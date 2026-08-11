@@ -10,38 +10,32 @@
  * Project memory lives in projects-memory/<id>/MEMORY.md and is managed
  * through the project-specific methods.
  */
-import { createHash, randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import {
-  ENTRY_DELIMITER,
-  DEFAULT_MEMORY_CHAR_LIMIT,
-  DEFAULT_USER_CHAR_LIMIT,
-  DEFAULT_PROJECT_CHAR_LIMIT,
-  DEFAULT_FAILURE_INJECTION_MAX_AGE_DAYS,
-  DEFAULT_FAILURE_INJECTION_MAX_ENTRIES,
-  STANDING_MAX_ENTRIES,
-  STANDING_MAX_CHARS,
-  MEMORY_FILE,
-  USER_FILE,
-  FAILURES_FILE,
-  STANDING_FILE,
-} from "./prompts.ts";
-import {
+  failuresFile,
+  historyFile,
   MEMORY_ROOT,
+  memoryFile,
   PROJECTS_MEMORY_DIR,
   projectMemoryDir,
   projectMemoryFile,
-  userFile,
-  memoryFile,
-  failuresFile,
   standingFile,
-  historyFile,
+  userFile,
 } from "./paths.ts";
+import {
+  DEFAULT_FAILURE_INJECTION_MAX_AGE_DAYS,
+  DEFAULT_FAILURE_INJECTION_MAX_ENTRIES,
+  DEFAULT_MEMORY_CHAR_LIMIT,
+  DEFAULT_PROJECT_CHAR_LIMIT,
+  DEFAULT_USER_CHAR_LIMIT,
+  ENTRY_DELIMITER,
+  STANDING_MAX_CHARS,
+} from "./prompts.ts";
 
 export type Target = "memory" | "user" | "failure";
-export type MemoryCategory =
-  | "failure" | "correction" | "insight" | "preference" | "convention" | "tool-quirk";
+export type MemoryCategory = "failure" | "correction" | "insight" | "preference" | "convention" | "tool-quirk";
 export type OverflowStrategy = "auto-consolidate" | "fifo-evict" | "reject";
 
 export type MemoryMutationOperation = {
@@ -102,18 +96,22 @@ export class MemoryStore {
     | ((target: Target | "project", signal?: AbortSignal, projectId?: string) => Promise<ConsolidationResult>)
     | null = null;
 
-  constructor(private opts: {
-    memoryCharLimit?: number;
-    userCharLimit?: number;
-    projectCharLimit?: number;
-    failureInjectionEnabled?: boolean;
-    failureInjectionMaxAgeDays?: number;
-    failureInjectionMaxEntries?: number;
-    overflowStrategy?: OverflowStrategy;
-  } = {}) {}
+  constructor(
+    private opts: {
+      memoryCharLimit?: number;
+      userCharLimit?: number;
+      projectCharLimit?: number;
+      failureInjectionEnabled?: boolean;
+      failureInjectionMaxAgeDays?: number;
+      failureInjectionMaxEntries?: number;
+      overflowStrategy?: OverflowStrategy;
+    } = {},
+  ) {}
 
   // ─── Injection points ───
-  setConsolidator(fn: (target: Target | "project", signal?: AbortSignal, projectId?: string) => Promise<ConsolidationResult>): void {
+  setConsolidator(
+    fn: (target: Target | "project", signal?: AbortSignal, projectId?: string) => Promise<ConsolidationResult>,
+  ): void {
     this.consolidator = fn;
   }
 
@@ -200,7 +198,7 @@ export class MemoryStore {
       joined = items.join("\n");
     }
     const header = "STANDING INSTRUCTIONS (follow these):";
-    return `${header}\n${items.map((s) => "• " + this.stripMetadata(s)).join("\n")}`;
+    return `${header}\n${items.map((s) => `• ${this.stripMetadata(s)}`).join("\n")}`;
   }
 
   // ─── File I/O ───
@@ -245,12 +243,23 @@ export class MemoryStore {
   }
 
   // ─── Metadata encode / decode ───
-  private encodeEntry(text: string, created: string, lastReferenced: string, project?: string, superseded?: string | null, supersedes?: string | null): string {
+  private encodeEntry(
+    text: string,
+    created: string,
+    lastReferenced: string,
+    project?: string,
+    superseded?: string | null,
+    supersedes?: string | null,
+  ): string {
     const projectMetadata = project?.trim()
       ? `, project64=${Buffer.from(project.trim(), "utf-8").toString("base64url")}`
       : "";
-    const supersededMetadata = superseded ? `, superseded=${Buffer.from(superseded, "utf-8").toString("base64url")}` : "";
-    const supersedesMetadata = supersedes ? `, supersedes=${Buffer.from(supersedes, "utf-8").toString("base64url")}` : "";
+    const supersededMetadata = superseded
+      ? `, superseded=${Buffer.from(superseded, "utf-8").toString("base64url")}`
+      : "";
+    const supersedesMetadata = supersedes
+      ? `, supersedes=${Buffer.from(supersedes, "utf-8").toString("base64url")}`
+      : "";
     return `${text} <!-- created=${created}, last=${lastReferenced}${projectMetadata}${supersededMetadata}${supersedesMetadata} -->`;
   }
 
@@ -263,19 +272,25 @@ export class MemoryStore {
       if (match[4]) {
         try {
           project = Buffer.from(match[4], "base64url").toString("utf-8").trim() || null;
-        } catch { /* ignore */ }
+        } catch {
+          /* ignore */
+        }
       }
       let superseded: string | null = null;
       if (match[5]) {
         try {
           superseded = Buffer.from(match[5], "base64url").toString("utf-8").trim() || null;
-        } catch { /* ignore */ }
+        } catch {
+          /* ignore */
+        }
       }
       let supersedes: string | null = null;
       if (match[6]) {
         try {
           supersedes = Buffer.from(match[6], "base64url").toString("utf-8").trim() || null;
-        } catch { /* ignore */ }
+        } catch {
+          /* ignore */
+        }
       }
       return {
         text: match[1].trim(),
@@ -287,19 +302,29 @@ export class MemoryStore {
       };
     }
     const today = todayStr();
-    return { text: raw.trim(), created: today, lastReferenced: today, project: null, superseded: null, supersedes: null };
+    return {
+      text: raw.trim(),
+      created: today,
+      lastReferenced: today,
+      project: null,
+      superseded: null,
+      supersedes: null,
+    };
   }
 
   private stripMetadata(text: string): string {
     return this.decodeEntry(text).text;
   }
 
-  private buildFailureMemoryText(content: string, options: {
-    category: MemoryCategory;
-    failureReason?: string;
-    correctedTo?: string;
-    project?: string;
-  }): string {
+  private buildFailureMemoryText(
+    content: string,
+    options: {
+      category: MemoryCategory;
+      failureReason?: string;
+      correctedTo?: string;
+      project?: string;
+    },
+  ): string {
     // 去掉 content 自身的 category 前缀（只剥合法 category），防止 [insight] [insight] 双前缀
     const CATEGORY_NAMES = ["failure", "correction", "insight", "preference", "convention", "tool-quirk"];
     let trimmedContent = content.trim();
@@ -308,8 +333,8 @@ export class MemoryStore {
       trimmedContent = trimmedContent.slice(m[0].length);
     }
     const parts = [`[${options.category}] ${trimmedContent}`];
-    if (options.failureReason) parts.push("Failed: " + options.failureReason);
-    if (options.correctedTo) parts.push("Corrected to: " + options.correctedTo);
+    if (options.failureReason) parts.push(`Failed: ${options.failureReason}`);
+    if (options.correctedTo) parts.push(`Corrected to: ${options.correctedTo}`);
     return parts.join(" — ");
   }
 
@@ -318,25 +343,40 @@ export class MemoryStore {
     return this.addWithConsolidation(target, content, project, signal, 1, "Entry added.");
   }
 
-  async addFailure(content: string, options: {
-    category: MemoryCategory;
-    failureReason?: string;
-    correctedTo?: string;
-    project?: string;
-  }): Promise<MemoryResult> {
+  async addFailure(
+    content: string,
+    options: {
+      category: MemoryCategory;
+      failureReason?: string;
+      correctedTo?: string;
+      project?: string;
+    },
+  ): Promise<MemoryResult> {
     const text = this.buildFailureMemoryText(content, options);
-    return this.addWithConsolidation("failure", text, options.project, undefined, 1,
-      `Failure memory saved: ${options.category}`);
+    return this.addWithConsolidation(
+      "failure",
+      text,
+      options.project,
+      undefined,
+      1,
+      `Failure memory saved: ${options.category}`,
+    );
   }
 
   private async _add(
-    target: Target, content: string, project?: string, addedMessage = "Entry added.",
+    target: Target,
+    content: string,
+    project?: string,
+    addedMessage = "Entry added.",
   ): Promise<MemoryResult> {
     content = content.trim();
     if (!content) return { success: false, error: "Content cannot be empty." };
     // 单条上限：防模型写超长条目占满容量（工具描述建议 ≤300，但 failure 天然较长）
     if (content.length > MAX_SINGLE_ENTRY_CHARS) {
-      return { success: false, error: `Entry too long (${content.length} chars, max ${MAX_SINGLE_ENTRY_CHARS}). Split into multiple entries or shorten.` };
+      return {
+        success: false,
+        error: `Entry too long (${content.length} chars, max ${MAX_SINGLE_ENTRY_CHARS}). Split into multiple entries or shorten.`,
+      };
     }
 
     await this.syncTargetFromDiskIfChanged(target);
@@ -346,8 +386,7 @@ export class MemoryStore {
 
     const duplicate = entries.some((entry) => {
       const decoded = this.decodeEntry(entry);
-      return decoded.text === content
-        && (target !== "failure" || decoded.project === normalizedProject);
+      return decoded.text === content && (target !== "failure" || decoded.project === normalizedProject);
     });
     if (duplicate) {
       return this.successResponse(target, "Entry already exists (no duplicate added).");
@@ -371,37 +410,58 @@ export class MemoryStore {
   }
 
   private async addWithConsolidation(
-    target: Target, content: string, project: string | undefined, signal: AbortSignal | undefined,
-    retriesLeft: number, addedMessage: string,
+    target: Target,
+    content: string,
+    project: string | undefined,
+    signal: AbortSignal | undefined,
+    retriesLeft: number,
+    addedMessage: string,
   ): Promise<MemoryResult> {
     const result = await this._add(target, content, project, addedMessage);
     if (
-      result.success || retriesLeft <= 0
-      || this.overflowStrategy() !== "auto-consolidate"
-      || !this.consolidator
-      || !result.error?.startsWith("Memory at ")
+      result.success ||
+      retriesLeft <= 0 ||
+      this.overflowStrategy() !== "auto-consolidate" ||
+      !this.consolidator ||
+      !result.error?.startsWith("Memory at ")
     ) {
       return result;
     }
 
     const consolidation = await this.consolidator(target, signal).catch(
-      (err): ConsolidationResult => ({ consolidated: false, error: `consolidator threw ${String(err).slice(0, 200)}` }),
+      (err): ConsolidationResult => ({
+        consolidated: false,
+        error: `consolidator threw ${String(err).slice(0, 200)}`,
+      }),
     );
     if (consolidation.deferred) {
-      return { ...result, error: `${result.error} Another session is consolidating '${target}' right now, so this entry was not saved — retry in a moment.` };
+      return {
+        ...result,
+        error: `${result.error} Another session is consolidating '${target}' right now, so this entry was not saved — retry in a moment.`,
+      };
     }
     if (!consolidation.consolidated) {
-      return { ...result, error: `${result.error} Auto-consolidation attempted but failed: ${consolidation.error || "no reason reported"}` };
+      return {
+        ...result,
+        error: `${result.error} Auto-consolidation attempted but failed: ${consolidation.error || "no reason reported"}`,
+      };
     }
 
     await this.loadFromDisk();
     const retried = await this.addWithConsolidation(target, content, project, signal, retriesLeft - 1, addedMessage);
     if (retried.success || !retried.error?.startsWith("Memory at ")) return retried;
-    return { ...retried, error: `${retried.error} Auto-consolidation ran but did not free enough space.` };
+    return {
+      ...retried,
+      error: `${retried.error} Auto-consolidation ran but did not free enough space.`,
+    };
   }
 
   private async fifoEvictAndAdd(
-    target: Target, entries: string[], encoded: string, contentLength: number, limit: number,
+    target: Target,
+    entries: string[],
+    encoded: string,
+    contentLength: number,
+    limit: number,
   ): Promise<MemoryResult> {
     if (encoded.length > limit) return this.memoryFullError(target, contentLength);
     const remaining = [...entries];
@@ -412,7 +472,10 @@ export class MemoryStore {
     remaining.push(encoded);
     await this.saveToDisk(target, remaining);
     return {
-      ...this.successResponse(target, `Memory updated. Rotated ${evicted.length} older ${evicted.length === 1 ? "entry" : "entries"} to stay within the limit.`),
+      ...this.successResponse(
+        target,
+        `Memory updated. Rotated ${evicted.length} older ${evicted.length === 1 ? "entry" : "entries"} to stay within the limit.`,
+      ),
       evicted_entries: evicted,
       evicted_count: evicted.length,
     };
@@ -450,9 +513,16 @@ export class MemoryStore {
       oldText = normalizeLookup(oldText);
       newContent = newContent.trim();
       if (!oldText) return { success: false, error: "old_text cannot be empty." };
-      if (!newContent) return { success: false, error: "new_content cannot be empty. Use 'remove' to delete entries." };
+      if (!newContent)
+        return {
+          success: false,
+          error: "new_content cannot be empty. Use 'remove' to delete entries.",
+        };
       if (newContent.length > MAX_SINGLE_ENTRY_CHARS) {
-        return { success: false, error: `Replacement too long (${newContent.length} chars, max ${MAX_SINGLE_ENTRY_CHARS}). Split into multiple entries or shorten.` };
+        return {
+          success: false,
+          error: `Replacement too long (${newContent.length} chars, max ${MAX_SINGLE_ENTRY_CHARS}). Split into multiple entries or shorten.`,
+        };
       }
 
       await this.syncTargetFromDiskIfChanged(target);
@@ -463,7 +533,9 @@ export class MemoryStore {
         return {
           success: false,
           error: `Multiple entries matched '${oldText}'. Be more specific.`,
-          matches: matches.map((e) => this.stripMetadata(e).slice(0, 80) + (this.stripMetadata(e).length > 80 ? "..." : "")),
+          matches: matches.map(
+            (e) => this.stripMetadata(e).slice(0, 80) + (this.stripMetadata(e).length > 80 ? "..." : ""),
+          ),
         };
       }
 
@@ -473,8 +545,21 @@ export class MemoryStore {
       // 新条目标 supersedes 指向旧条目。能追溯"以前是怎么配的"。
       const oldSummary = decoded.text.slice(0, 60);
       const newSummary = newContent.slice(0, 60);
-      const history = this.encodeEntry(decoded.text, decoded.created, today, decoded.project ?? undefined, `${today}:${newSummary}`);
-      const replacement = this.encodeEntry(newContent, decoded.created, today, decoded.project ?? undefined, null, `${today}:${oldSummary}`);
+      const history = this.encodeEntry(
+        decoded.text,
+        decoded.created,
+        today,
+        decoded.project ?? undefined,
+        `${today}:${newSummary}`,
+      );
+      const replacement = this.encodeEntry(
+        newContent,
+        decoded.created,
+        today,
+        decoded.project ?? undefined,
+        null,
+        `${today}:${oldSummary}`,
+      );
       const testEntries = entries.map((e) => (e === matches[0] ? replacement : e));
       const newTotal = testEntries.join(ENTRY_DELIMITER).length;
       if (newTotal > this.charLimit(target)) {
@@ -503,17 +588,23 @@ export class MemoryStore {
         return {
           success: false,
           error: `Multiple entries matched '${oldText}'. Be more specific.`,
-          matches: matches.map((e) => this.stripMetadata(e).slice(0, 80) + (this.stripMetadata(e).length > 80 ? "..." : "")),
+          matches: matches.map(
+            (e) => this.stripMetadata(e).slice(0, 80) + (this.stripMetadata(e).length > 80 ? "..." : ""),
+          ),
         };
       }
       const matched = new Set(matches);
-      await this.saveToDisk(target, entries.filter((e) => !matched.has(e)));
+      await this.saveToDisk(
+        target,
+        entries.filter((e) => !matched.has(e)),
+      );
       return this.successResponse(target, "Entry removed.");
     });
   }
 
   async applyMutationPlan(
-    target: Target, operations: MemoryMutationOperation[],
+    target: Target,
+    operations: MemoryMutationOperation[],
     options: { requireShrink?: boolean } = {},
   ): Promise<MemoryResult> {
     // 超限时 auto-consolidate 重试一次（与 addWithConsolidation 同模式）：
@@ -521,22 +612,31 @@ export class MemoryStore {
     return this.runTargetMutation(target, async () => {
       const result = await this._applyMutationPlan(target, operations, options);
       if (
-        result.success
-        || this.overflowStrategy() !== "auto-consolidate"
-        || !this.consolidator
-        || !result.error?.startsWith("Memory mutation plan would put memory at ")
+        result.success ||
+        this.overflowStrategy() !== "auto-consolidate" ||
+        !this.consolidator ||
+        !result.error?.startsWith("Memory mutation plan would put memory at ")
       ) {
         return result;
       }
       // 触发合并（24h 冷却 + 过度删除保护内置），成功后重试
       const consolidation = await this.consolidator(target).catch(
-        (err): ConsolidationResult => ({ consolidated: false, error: `consolidator threw ${String(err).slice(0, 200)}` }),
+        (err): ConsolidationResult => ({
+          consolidated: false,
+          error: `consolidator threw ${String(err).slice(0, 200)}`,
+        }),
       );
       if (consolidation.deferred) {
-        return { ...result, error: `${result.error} Auto-consolidation deferred (24h cooldown) — retry later.` };
+        return {
+          ...result,
+          error: `${result.error} Auto-consolidation deferred (24h cooldown) — retry later.`,
+        };
       }
       if (!consolidation.consolidated) {
-        return { ...result, error: `${result.error} Auto-consolidation attempted but failed: ${consolidation.error || "no reason reported"}` };
+        return {
+          ...result,
+          error: `${result.error} Auto-consolidation attempted but failed: ${consolidation.error || "no reason reported"}`,
+        };
       }
       // 合并成功：重新加载磁盘数据（consolidate 可能改动了文件），重试 plan
       await this.loadFromDisk();
@@ -545,91 +645,138 @@ export class MemoryStore {
   }
 
   private async _applyMutationPlan(
-    target: Target, operations: MemoryMutationOperation[],
+    target: Target,
+    operations: MemoryMutationOperation[],
     options: { requireShrink?: boolean } = {},
   ): Promise<MemoryResult> {
-      await this.syncTargetFromDiskIfChanged(target);
-      if (operations.length === 0) return { success: false, error: "Memory mutation plan requires at least one operation." };
+    await this.syncTargetFromDiskIfChanged(target);
+    if (operations.length === 0)
+      return {
+        success: false,
+        error: "Memory mutation plan requires at least one operation.",
+      };
 
-      const originalEntries = [...this.entriesFor(target)];
-      let planned = [...originalEntries];
-      const today = todayStr();
-      const historyEntries: string[] = [];
+    const originalEntries = [...this.entriesFor(target)];
+    let planned = [...originalEntries];
+    const today = todayStr();
+    const historyEntries: string[] = [];
 
-      for (const op of operations) {
-        if (op.action === "add") {
-          const content = op.content?.trim() ?? "";
-          if (!content) return { success: false, error: "Memory mutation add requires content." };
-          if (content.length > MAX_SINGLE_ENTRY_CHARS) {
-            return { success: false, error: `Memory mutation add entry too long (${content.length} chars, max ${MAX_SINGLE_ENTRY_CHARS}).` };
-          }
-          const normalizedContent = target === "failure" && op.category
-            ? this.buildFailureMemoryText(content, { category: op.category, failureReason: op.failure_reason, project: op.project })
-            : content;
-          const project = op.project?.trim() || null;
-          if (planned.some((entry) => {
-            const d = this.decodeEntry(entry);
-            return d.text === normalizedContent && (target !== "failure" || d.project === project);
-          })) {
-            return { success: false, error: "Memory mutation plan would add a duplicate entry." };
-          }
-          planned.push(this.encodeEntry(normalizedContent, today, today, op.project));
-          continue;
-        }
-
-        const oldText = normalizeLookup(op.old_text ?? "");
-        if (!oldText) return { success: false, error: `Memory mutation ${op.action} requires old_text.` };
-        // 精确匹配优先：consolidate 生成的 old_text 常是完整条目文本，
-        // substring 匹配会让含相同片段的多个条目同时命中（failure 条目常有重复词）→ consolidate 失败。
-        const matches = matchEntries(planned, oldText);
-        if (matches.length === 0) return { success: false, error: `No entry matched '${oldText}'.` };
-        if (matches.length > 1) {
+    for (const op of operations) {
+      if (op.action === "add") {
+        const content = op.content?.trim() ?? "";
+        if (!content)
           return {
             success: false,
-            error: `Multiple entries matched '${oldText}'. Be more specific.`,
-            matches: matches.map((e) => this.stripMetadata(e).slice(0, 120) + (this.stripMetadata(e).length > 120 ? "..." : "")),
+            error: "Memory mutation add requires content.",
+          };
+        if (content.length > MAX_SINGLE_ENTRY_CHARS) {
+          return {
+            success: false,
+            error: `Memory mutation add entry too long (${content.length} chars, max ${MAX_SINGLE_ENTRY_CHARS}).`,
           };
         }
-
-        if (op.action === "remove") {
-          const matched = new Set(matches);
-          planned = planned.filter((e) => !matched.has(e));
-          continue;
+        const normalizedContent =
+          target === "failure" && op.category
+            ? this.buildFailureMemoryText(content, {
+                category: op.category,
+                failureReason: op.failure_reason,
+                project: op.project,
+              })
+            : content;
+        const project = op.project?.trim() || null;
+        if (
+          planned.some((entry) => {
+            const d = this.decodeEntry(entry);
+            return d.text === normalizedContent && (target !== "failure" || d.project === project);
+          })
+        ) {
+          return {
+            success: false,
+            error: "Memory mutation plan would add a duplicate entry.",
+          };
         }
-
-        const content = op.content?.trim() ?? "";
-        if (!content) return { success: false, error: "Memory mutation replace requires content." };
-        const decoded = this.decodeEntry(matches[0]);
-        // 双时态演化：旧条目进历史，新条目标 supersedes
-        const oldSummary = decoded.text.slice(0, 60);
-        const newSummary = content.slice(0, 60);
-        historyEntries.push(this.encodeEntry(decoded.text, decoded.created, today, decoded.project ?? undefined, `${today}:${newSummary}`));
-        const replacement = this.encodeEntry(content, decoded.created, today, decoded.project ?? undefined, null, `${today}:${oldSummary}`);
-        planned = planned.map((e) => (e === matches[0] ? replacement : e));
+        planned.push(this.encodeEntry(normalizedContent, today, today, op.project));
+        continue;
       }
 
-      const originalTotal = originalEntries.join(ENTRY_DELIMITER).length;
-      const plannedTotal = planned.join(ENTRY_DELIMITER).length;
-      if (plannedTotal > this.charLimit(target)) {
-        return { success: false, error: `Memory mutation plan would put memory at ${plannedTotal}/${this.charLimit(target)} chars.` };
-      }
-      if (options.requireShrink && plannedTotal >= originalTotal) {
-        return { success: false, error: `Memory mutation plan did not shrink the target (${originalTotal} -> ${plannedTotal} chars).` };
+      const oldText = normalizeLookup(op.old_text ?? "");
+      if (!oldText)
+        return {
+          success: false,
+          error: `Memory mutation ${op.action} requires old_text.`,
+        };
+      // 精确匹配优先：consolidate 生成的 old_text 常是完整条目文本，
+      // substring 匹配会让含相同片段的多个条目同时命中（failure 条目常有重复词）→ consolidate 失败。
+      const matches = matchEntries(planned, oldText);
+      if (matches.length === 0) return { success: false, error: `No entry matched '${oldText}'.` };
+      if (matches.length > 1) {
+        return {
+          success: false,
+          error: `Multiple entries matched '${oldText}'. Be more specific.`,
+          matches: matches.map(
+            (e) => this.stripMetadata(e).slice(0, 120) + (this.stripMetadata(e).length > 120 ? "..." : ""),
+          ),
+        };
       }
 
-      await this.saveToDisk(target, planned);
-      for (const h of historyEntries) {
-        await this.appendHistory(target, h).catch((err) => {
-          console.error(`[hermes-memory] history append failed: ${String(err)}`);
-        });
+      if (op.action === "remove") {
+        const matched = new Set(matches);
+        planned = planned.filter((e) => !matched.has(e));
+        continue;
       }
-      return this.successResponse(target, `Applied ${operations.length} memory operations atomically.`);
+
+      const content = op.content?.trim() ?? "";
+      if (!content)
+        return {
+          success: false,
+          error: "Memory mutation replace requires content.",
+        };
+      const decoded = this.decodeEntry(matches[0]);
+      // 双时态演化：旧条目进历史，新条目标 supersedes
+      const oldSummary = decoded.text.slice(0, 60);
+      const newSummary = content.slice(0, 60);
+      historyEntries.push(
+        this.encodeEntry(decoded.text, decoded.created, today, decoded.project ?? undefined, `${today}:${newSummary}`),
+      );
+      const replacement = this.encodeEntry(
+        content,
+        decoded.created,
+        today,
+        decoded.project ?? undefined,
+        null,
+        `${today}:${oldSummary}`,
+      );
+      planned = planned.map((e) => (e === matches[0] ? replacement : e));
+    }
+
+    const originalTotal = originalEntries.join(ENTRY_DELIMITER).length;
+    const plannedTotal = planned.join(ENTRY_DELIMITER).length;
+    if (plannedTotal > this.charLimit(target)) {
+      return {
+        success: false,
+        error: `Memory mutation plan would put memory at ${plannedTotal}/${this.charLimit(target)} chars.`,
+      };
+    }
+    if (options.requireShrink && plannedTotal >= originalTotal) {
+      return {
+        success: false,
+        error: `Memory mutation plan did not shrink the target (${originalTotal} -> ${plannedTotal} chars).`,
+      };
+    }
+
+    await this.saveToDisk(target, planned);
+    for (const h of historyEntries) {
+      await this.appendHistory(target, h).catch((err) => {
+        console.error(`[hermes-memory] history append failed: ${String(err)}`);
+      });
+    }
+    return this.successResponse(target, `Applied ${operations.length} memory operations atomically.`);
   }
 
   /** 双时态演化：把被取代的旧条目追加到 history.md（不占容量、不参与检索）。
    *  历史文件上限 20000 字符，超出时丢弃最旧的历史（历史是辅助，活跃条目优先）。
    *  target 用 string：project 条目也走同一历史文件（"project" 不在 Target 联合内）。 */
-  private async appendHistory(target: string, historyEntry: string): Promise<void> {
+  private async appendHistory(_target: string, historyEntry: string): Promise<void> {
     const file = historyFile();
     let existing = "";
     try {
@@ -677,18 +824,30 @@ export class MemoryStore {
   }
 
   async addToProject(projectId: string, content: string): Promise<MemoryResult> {
-    if (!projectId) return { success: false, error: "No active project for project-scoped memory." };
+    if (!projectId)
+      return {
+        success: false,
+        error: "No active project for project-scoped memory.",
+      };
     content = content.trim();
     if (!content) return { success: false, error: "Content cannot be empty." };
     if (content.length > MAX_SINGLE_ENTRY_CHARS) {
-      return { success: false, error: `Entry too long (${content.length} chars, max ${MAX_SINGLE_ENTRY_CHARS}). Split into multiple entries or shorten.` };
+      return {
+        success: false,
+        error: `Entry too long (${content.length} chars, max ${MAX_SINGLE_ENTRY_CHARS}). Split into multiple entries or shorten.`,
+      };
     }
     const entries = await this.loadProject(projectId);
     const limit = this.opts.projectCharLimit ?? DEFAULT_PROJECT_CHAR_LIMIT;
     const today = todayStr();
 
     if (entries.some((e) => this.stripMetadata(e) === content)) {
-      return { success: true, message: "Entry already exists (no duplicate added).", usage: this.projectUsage(entries, limit), entry_count: entries.length };
+      return {
+        success: true,
+        message: "Entry already exists (no duplicate added).",
+        usage: this.projectUsage(entries, limit),
+        entry_count: entries.length,
+      };
     }
     const encoded = this.encodeEntry(content, today, today);
     const newTotal = [...entries, encoded].join(ENTRY_DELIMITER).length;
@@ -697,23 +856,43 @@ export class MemoryStore {
       // 合并成功则重试写入；失败才报错。
       if (this.consolidator) {
         const consolidation = await this.consolidator("project", undefined, projectId).catch(
-          (err): ConsolidationResult => ({ consolidated: false, error: `consolidator threw ${String(err).slice(0, 200)}` }),
+          (err): ConsolidationResult => ({
+            consolidated: false,
+            error: `consolidator threw ${String(err).slice(0, 200)}`,
+          }),
         );
         if (consolidation.deferred) {
-          return { success: false, error: `Project memory at ${newTotal}/${limit} chars. Another consolidation ran recently — retry in a moment.` };
+          return {
+            success: false,
+            error: `Project memory at ${newTotal}/${limit} chars. Another consolidation ran recently — retry in a moment.`,
+          };
         }
         if (consolidation.consolidated) {
           const retried = await this.addToProject(projectId, content);
           if (retried.success || !retried.error?.includes("Project memory at")) return retried;
-          return { ...retried, error: `${retried.error} Auto-consolidation ran but did not free enough space.` };
+          return {
+            ...retried,
+            error: `${retried.error} Auto-consolidation ran but did not free enough space.`,
+          };
         }
-        return { success: false, error: `Project memory at ${newTotal}/${limit} chars. Auto-consolidation attempted but failed: ${consolidation.error || "no reason reported"}` };
+        return {
+          success: false,
+          error: `Project memory at ${newTotal}/${limit} chars. Auto-consolidation attempted but failed: ${consolidation.error || "no reason reported"}`,
+        };
       }
-      return { success: false, error: `Project memory at ${newTotal}/${limit} chars. Replace or remove existing entries first.` };
+      return {
+        success: false,
+        error: `Project memory at ${newTotal}/${limit} chars. Replace or remove existing entries first.`,
+      };
     }
     entries.push(encoded);
     await this.saveProjectToDisk(projectId, entries);
-    return { success: true, message: "Entry added.", usage: this.projectUsage(entries, limit), entry_count: entries.length };
+    return {
+      success: true,
+      message: "Entry added.",
+      usage: this.projectUsage(entries, limit),
+      entry_count: entries.length,
+    };
   }
 
   async replaceProjectEntry(projectId: string, oldText: string, newContent: string): Promise<MemoryResult> {
@@ -724,22 +903,48 @@ export class MemoryStore {
     const limit = this.opts.projectCharLimit ?? DEFAULT_PROJECT_CHAR_LIMIT;
     const matches = matchEntries(entries, oldText);
     if (matches.length === 0) return { success: false, error: `No entry matched '${oldText}'.` };
-    if (matches.length > 1) return { success: false, error: `Multiple entries matched '${oldText}'. Be more specific.` };
+    if (matches.length > 1)
+      return {
+        success: false,
+        error: `Multiple entries matched '${oldText}'. Be more specific.`,
+      };
     const decoded = this.decodeEntry(matches[0]);
     const today = todayStr();
     // 双时态演化：旧条目进历史，新条目标 supersedes
     const oldSummary = decoded.text.slice(0, 60);
     const newSummary = newContent.slice(0, 60);
-    const history = this.encodeEntry(decoded.text, decoded.created, today, decoded.project ?? undefined, `${today}:${newSummary}`);
-    const replacement = this.encodeEntry(newContent, decoded.created, today, decoded.project ?? undefined, null, `${today}:${oldSummary}`);
+    const history = this.encodeEntry(
+      decoded.text,
+      decoded.created,
+      today,
+      decoded.project ?? undefined,
+      `${today}:${newSummary}`,
+    );
+    const replacement = this.encodeEntry(
+      newContent,
+      decoded.created,
+      today,
+      decoded.project ?? undefined,
+      null,
+      `${today}:${oldSummary}`,
+    );
     const test = entries.map((e) => (e === matches[0] ? replacement : e));
     const newTotal = test.join(ENTRY_DELIMITER).length;
-    if (newTotal > limit) return { success: false, error: `Replacement would put project memory at ${newTotal}/${limit} chars.` };
+    if (newTotal > limit)
+      return {
+        success: false,
+        error: `Replacement would put project memory at ${newTotal}/${limit} chars.`,
+      };
     await this.saveProjectToDisk(projectId, test);
     await this.appendHistory("project", history).catch((err) => {
       console.error(`[hermes-memory] history append failed: ${String(err)}`);
     });
-    return { success: true, message: "Entry replaced (old version kept as history).", usage: this.projectUsage(test, limit), entry_count: test.length };
+    return {
+      success: true,
+      message: "Entry replaced (old version kept as history).",
+      usage: this.projectUsage(test, limit),
+      entry_count: test.length,
+    };
   }
 
   async removeProjectEntry(projectId: string, oldText: string): Promise<MemoryResult> {
@@ -749,11 +954,20 @@ export class MemoryStore {
     const limit = this.opts.projectCharLimit ?? DEFAULT_PROJECT_CHAR_LIMIT;
     const matches = matchEntries(entries, oldText);
     if (matches.length === 0) return { success: false, error: `No entry matched '${oldText}'.` };
-    if (matches.length > 1) return { success: false, error: `Multiple entries matched '${oldText}'. Be more specific.` };
+    if (matches.length > 1)
+      return {
+        success: false,
+        error: `Multiple entries matched '${oldText}'. Be more specific.`,
+      };
     const matched = new Set(matches);
     const remaining = entries.filter((e) => !matched.has(e));
     await this.saveProjectToDisk(projectId, remaining);
-    return { success: true, message: "Entry removed.", usage: this.projectUsage(remaining, limit), entry_count: remaining.length };
+    return {
+      success: true,
+      message: "Entry removed.",
+      usage: this.projectUsage(remaining, limit),
+      entry_count: remaining.length,
+    };
   }
 
   private async saveProjectToDisk(projectId: string, entries: string[]): Promise<void> {
@@ -797,7 +1011,7 @@ export class MemoryStore {
       const recent = this.getFailureEntries(maxAge).slice(0, maxEntries);
       if (recent.length) {
         const header = "RECENT FAILURES & LESSONS (learn from these):";
-        parts.push(this.fenceBlock(`${header}\n${recent.map((e) => "• " + e).join("\n")}`));
+        parts.push(this.fenceBlock(`${header}\n${recent.map((e) => `• ${e}`).join("\n")}`));
       }
     }
     return parts.join("\n\n");
@@ -898,9 +1112,7 @@ export class MemoryStore {
   }
 
   // ─── Mutation wrapper with external-change detection ───
-  private async runTargetMutation(
-    target: Target, mutation: () => Promise<MemoryResult>,
-  ): Promise<MemoryResult> {
+  private async runTargetMutation(target: Target, mutation: () => Promise<MemoryResult>): Promise<MemoryResult> {
     for (let attempt = 0; ; attempt++) {
       try {
         const result = await mutation();
@@ -911,7 +1123,8 @@ export class MemoryStore {
         if (attempt >= MAX_EXTERNAL_WRITE_RETRIES) {
           return {
             success: false,
-            error: "Memory file changed repeatedly during this update. No external changes were overwritten. If you edited the file manually, re-run after the file is stable.",
+            error:
+              "Memory file changed repeatedly during this update. No external changes were overwritten. If you edited the file manually, re-run after the file is stable.",
           };
         }
       }
@@ -924,9 +1137,10 @@ export class MemoryStore {
     const content = entries.join(ENTRY_DELIMITER);
     const current = content.length;
     const pct = limit > 0 ? Math.min(100, Math.floor((current / limit) * 100)) : 0;
-    const header = target === "user"
-      ? `USER PROFILE (who the user is) [${pct}% — ${current}/${limit} chars]`
-      : `MEMORY (your personal notes) [${pct}% — ${current}/${limit} chars]`;
+    const header =
+      target === "user"
+        ? `USER PROFILE (who the user is) [${pct}% — ${current}/${limit} chars]`
+        : `MEMORY (your personal notes) [${pct}% — ${current}/${limit} chars]`;
     const separator = "═".repeat(46);
     return `${separator}\n${header}\n${separator}\n${content}`;
   }

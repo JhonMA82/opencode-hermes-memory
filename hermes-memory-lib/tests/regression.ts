@@ -6,13 +6,14 @@
  * 隔离原理：setMemoryRoot(临时目录) 让 MemoryStore 的所有路径指向临时目录，
  * 测试全程不触碰真实记忆文件（~/.config/opencode/memory/）。
  */
-import { setMemoryRoot } from "../paths.ts";
-import { MemoryStore } from "../store.ts";
-import { searchMemories } from "../search.ts";
-import { detectCorrection } from "../learn.ts";
+
 import * as fs from "node:fs/promises";
-import * as path from "node:path";
 import * as os from "node:os";
+import * as path from "node:path";
+import { detectCorrection } from "../learn.ts";
+import { setMemoryRoot } from "../paths.ts";
+import { searchMemories } from "../search.ts";
+import { MemoryStore } from "../store.ts";
 
 // ─── 隔离：临时目录 ───
 const TMP = await fs.mkdtemp(path.join(os.tmpdir(), "hm-iso-"));
@@ -21,8 +22,13 @@ setMemoryRoot(TMP);
 let passed = 0;
 let failed = 0;
 function assert(name: string, cond: boolean, detail = "") {
-  if (cond) { passed++; console.log(`✅ ${name}`); }
-  else { failed++; console.log(`❌ ${name} ${detail}`); }
+  if (cond) {
+    passed++;
+    console.log(`✅ ${name}`);
+  } else {
+    failed++;
+    console.log(`❌ ${name} ${detail}`);
+  }
 }
 
 // ─── 测试开始 ───
@@ -36,7 +42,11 @@ assert("add 成功", r.success);
 const countAfterAdd = store.usage().match(/\((\d+) entries\)/)?.[1];
 r = await store.add("memory", "测试条目A");
 const countAfterDup = store.usage().match(/\((\d+) entries\)/)?.[1];
-assert("查重不新增", r.success && (r.message ?? r.error ?? "").includes("already") && countAfterDup === countAfterAdd, `${r.message ?? r.error ?? ""} count ${countAfterAdd}->${countAfterDup}`);
+assert(
+  "查重不新增",
+  r.success && (r.message ?? r.error ?? "").includes("already") && countAfterDup === countAfterAdd,
+  `${r.message ?? r.error ?? ""} count ${countAfterAdd}->${countAfterDup}`,
+);
 
 // 2. 单条长度上限（MAX_SINGLE_ENTRY_CHARS=3000）
 r = await store.add("memory", "X".repeat(4000));
@@ -60,15 +70,27 @@ assert("addFailure", r.success, r.error ?? "");
 await store.add("user", "用户偏好测试");
 await store.add("memory", "环境事实测试");
 const hits = searchMemories(store, { query: "测试", limit: 10, touch: false });
-assert("全目标检索覆盖 user+memory", new Set(hits.map(h => h.target)).has("user") && new Set(hits.map(h => h.target)).has("memory"), hits.map(h => h.target).join(","));
+assert(
+  "全目标检索覆盖 user+memory",
+  new Set(hits.map((h) => h.target)).has("user") && new Set(hits.map((h) => h.target)).has("memory"),
+  hits.map((h) => h.target).join(","),
+);
 
 // 7. category 过滤
-const failureHits = searchMemories(store, { query: "失败", target: "failure", category: "tool-quirk", limit: 5, touch: false });
+const failureHits = searchMemories(store, {
+  query: "失败",
+  target: "failure",
+  category: "tool-quirk",
+  limit: 5,
+  touch: false,
+});
 assert("failure+category 过滤", failureHits.length === 1, `got ${failureHits.length}`);
 
 // 8. 纠正检测
-const fp = ["No, the file is there", "No, it's fine", "Actually, the build passed"].filter(c => detectCorrection(c).matched);
-const tp = ["No, use the other config", "No, don't do that"].filter(c => detectCorrection(c).matched);
+const fp = ["No, the file is there", "No, it's fine", "Actually, the build passed"].filter(
+  (c) => detectCorrection(c).matched,
+);
+const tp = ["No, use the other config", "No, don't do that"].filter((c) => detectCorrection(c).matched);
 assert("纠正检测误报0", fp.length === 0, String(fp.length));
 assert("纠正检测真报2", tp.length === 2, String(tp.length));
 
@@ -80,7 +102,11 @@ assert("remove 精确匹配成功", r2.success, r2.error ?? "");
 const r3 = await store.replace("memory", "opencode-go 中转站 B", "中转站 B-更新");
 assert("replace 精确匹配成功", r3.success, r3.error ?? "");
 // 剩余条目无 "opencode-go"（A 已删、B 已改名为 "中转站 B-更新"）
-const remains = searchMemories(store, { query: "opencode-go", limit: 10, touch: false });
+const remains = searchMemories(store, {
+  query: "opencode-go",
+  limit: 10,
+  touch: false,
+});
 assert("精确匹配后无残留命中", remains.length === 0, String(remains.length));
 
 // 10. project CRUD

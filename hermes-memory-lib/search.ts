@@ -5,7 +5,7 @@
  * The real Hermes uses SQLite FTS5; for OpenCode v1 we score with token
  * coverage + rarity weighting, which is plenty for small memory stores.
  */
-import type { MemoryStore, Target, MemoryCategory } from "./store.ts";
+import type { MemoryCategory, MemoryStore, Target } from "./store.ts";
 
 export type SearchHit = {
   target: Target | "project";
@@ -25,12 +25,79 @@ export type SearchOptions = {
 };
 
 const STOP_WORDS = new Set([
-  "the", "a", "an", "of", "to", "in", "on", "for", "and", "or", "but", "with",
-  "is", "are", "was", "were", "be", "been", "do", "does", "did", "this", "that",
-  "it", "its", "at", "by", "from", "as", "we", "you", "your", "i", "my", "me",
-  "use", "using", "how", "what", "why", "when", "where", "which", "should", "can",
-  "的", "了", "是", "在", "我", "你", "他", "她", "们", "这", "那", "个", "和", "与",
-  "也", "都", "要", "会", "能", "把", "被", "就", "很", "有", "不", "没", "吧", "吗",
+  "the",
+  "a",
+  "an",
+  "of",
+  "to",
+  "in",
+  "on",
+  "for",
+  "and",
+  "or",
+  "but",
+  "with",
+  "is",
+  "are",
+  "was",
+  "were",
+  "be",
+  "been",
+  "do",
+  "does",
+  "did",
+  "this",
+  "that",
+  "it",
+  "its",
+  "at",
+  "by",
+  "from",
+  "as",
+  "we",
+  "you",
+  "your",
+  "i",
+  "my",
+  "me",
+  "use",
+  "using",
+  "how",
+  "what",
+  "why",
+  "when",
+  "where",
+  "which",
+  "should",
+  "can",
+  "的",
+  "了",
+  "是",
+  "在",
+  "我",
+  "你",
+  "他",
+  "她",
+  "们",
+  "这",
+  "那",
+  "个",
+  "和",
+  "与",
+  "也",
+  "都",
+  "要",
+  "会",
+  "能",
+  "把",
+  "被",
+  "就",
+  "很",
+  "有",
+  "不",
+  "没",
+  "吧",
+  "吗",
 ]);
 
 function tokenize(text: string): string[] {
@@ -70,13 +137,13 @@ function categoryMatches(entryText: string, category?: MemoryCategory): boolean 
 
 // ─── 新鲜度加权（参考 Mem0 记忆衰减：只影响排序，不删除）───
 // 近期引用过的条目权重更高（1.5x），长期闲置的条目降权（0.5x）。
-const FRESH_DAYS = 7;        // 7 天内引用过 → 新鲜
-const STALE_DAYS = 30;       // 30 天未引用 → 闲置
+const FRESH_DAYS = 7; // 7 天内引用过 → 新鲜
+const STALE_DAYS = 30; // 30 天未引用 → 闲置
 const FRESH_BOOST = 1.5;
 const STALE_PENALTY = 0.5;
 
 function freshnessMultiplier(meta: { lastReferenced: string } | undefined): number {
-  if (!meta || !meta.lastReferenced) return 1;
+  if (!meta?.lastReferenced) return 1;
   const last = Date.parse(meta.lastReferenced);
   if (Number.isNaN(last)) return 1;
   const ageDays = (Date.now() - last) / 86_400_000;
@@ -86,10 +153,7 @@ function freshnessMultiplier(meta: { lastReferenced: string } | undefined): numb
   return FRESH_BOOST - ((ageDays - FRESH_DAYS) / (STALE_DAYS - FRESH_DAYS)) * (FRESH_BOOST - STALE_PENALTY);
 }
 
-export function searchMemories(
-  store: MemoryStore,
-  opts: SearchOptions,
-): SearchHit[] {
+export function searchMemories(store: MemoryStore, opts: SearchOptions): SearchHit[] {
   const queryTokens = tokenize(opts.query);
   if (queryTokens.length === 0) return [];
 
@@ -99,13 +163,22 @@ export function searchMemories(
   // Global + user + failure
   const globalTargets: Array<{ target: Target; entries: string[] }> = [];
   if (!opts.target || opts.target === "memory") {
-    globalTargets.push({ target: "memory", entries: store.getRawEntriesFor("memory") });
+    globalTargets.push({
+      target: "memory",
+      entries: store.getRawEntriesFor("memory"),
+    });
   }
   if (!opts.target || opts.target === "user") {
-    globalTargets.push({ target: "user", entries: store.getRawEntriesFor("user") });
+    globalTargets.push({
+      target: "user",
+      entries: store.getRawEntriesFor("user"),
+    });
   }
   if (!opts.target || opts.target === "failure") {
-    globalTargets.push({ target: "failure", entries: store.getRawEntriesFor("failure") });
+    globalTargets.push({
+      target: "failure",
+      entries: store.getRawEntriesFor("failure"),
+    });
   }
   for (const { target, entries } of globalTargets) {
     for (const raw of entries) {
@@ -113,7 +186,11 @@ export function searchMemories(
       if (!categoryMatches(entry, opts.category)) continue;
       const score = scoreEntry(entry, queryTokens);
       if (score > 0) {
-        hits.push({ target, content: entry, score: score * freshnessMultiplier(store.getEntryMeta(raw)) });
+        hits.push({
+          target,
+          content: entry,
+          score: score * freshnessMultiplier(store.getEntryMeta(raw)),
+        });
         if (opts.touch !== false) store.touchEntry(target, raw);
       }
     }
@@ -125,7 +202,12 @@ export function searchMemories(
       const entry = store.getEntryMeta(raw).text;
       const score = scoreEntry(entry, queryTokens);
       if (score > 0) {
-        hits.push({ target: "project", project: opts.project, content: entry, score: score * freshnessMultiplier(store.getEntryMeta(raw)) });
+        hits.push({
+          target: "project",
+          project: opts.project,
+          content: entry,
+          score: score * freshnessMultiplier(store.getEntryMeta(raw)),
+        });
         if (opts.touch !== false) store.touchEntry("project", raw, opts.project);
       }
     }

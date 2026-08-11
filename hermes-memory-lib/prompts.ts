@@ -172,10 +172,10 @@ export const CORRECTION_STRONG_PATTERNS: RegExp[] = [
 ];
 
 export const CORRECTION_WEAK_PATTERNS: RegExp[] = [
-  /^no[,\.\s!]/i,
-  /^wrong[,\.\s!]/i,
-  /^actually[,\.\s]/i,
-  /^stop[,\.\s!]/i,
+  /^no[,.\s!]/i,
+  /^wrong[,.\s!]/i,
+  /^actually[,.\s]/i,
+  /^stop[,.\s!]/i,
 ];
 
 export const CORRECTION_NEGATIVE_PATTERNS: RegExp[] = [
@@ -188,8 +188,24 @@ export const CORRECTION_NEGATIVE_PATTERNS: RegExp[] = [
 ];
 
 export const CORRECTION_DIRECTIVE_WORDS: string[] = [
-  "use", "don't", "dont", "do", "try", "make", "run", "install", "add",
-  "remove", "delete", "change", "fix", "put", "set", "write", "go", "stop",
+  "use",
+  "don't",
+  "dont",
+  "do",
+  "try",
+  "make",
+  "run",
+  "install",
+  "add",
+  "remove",
+  "delete",
+  "change",
+  "fix",
+  "put",
+  "set",
+  "write",
+  "go",
+  "stop",
   "start",
 ];
 

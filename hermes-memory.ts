@@ -21,25 +21,24 @@ import * as fsp from "node:fs/promises";
 import * as path from "node:path";
 import type { Plugin } from "@opencode-ai/plugin";
 import { tool } from "@opencode-ai/plugin";
-import { MemoryStore, type Target, type MemoryCategory, splitEntries } from "./hermes-memory-lib/store.ts";
-import { searchMemories } from "./hermes-memory-lib/search.ts";
-import { completeWithInternalSession, isInternalSession } from "./hermes-memory-lib/llm.ts";
-import { historyFile } from "./hermes-memory-lib/paths.ts";
 import {
-  runBackgroundReview,
-  runFlushReview,
+  clearSessionState,
   consolidateTarget,
   detectCorrection,
-  applyOperations,
+  runBackgroundReview,
+  runFlushReview,
   setDebugLogger,
-  clearSessionState,
 } from "./hermes-memory-lib/learn.ts";
+import { isInternalSession } from "./hermes-memory-lib/llm.ts";
+import { historyFile } from "./hermes-memory-lib/paths.ts";
 import {
-  MEMORY_POLICY_PROMPT,
-  MEMORY_ADD_TOOL_DESCRIPTION,
-  MEMORY_SEARCH_TOOL_DESCRIPTION,
   DEFAULT_NUDGE_INTERVAL,
+  MEMORY_ADD_TOOL_DESCRIPTION,
+  MEMORY_POLICY_PROMPT,
+  MEMORY_SEARCH_TOOL_DESCRIPTION,
 } from "./hermes-memory-lib/prompts.ts";
+import { searchMemories } from "./hermes-memory-lib/search.ts";
+import { type MemoryCategory, MemoryStore, splitEntries, type Target } from "./hermes-memory-lib/store.ts";
 
 const LOG_FILE = path.join(process.env.HOME ?? ".", ".local", "share", "opencode", "log", "hermes-memory.log");
 const LOG_MAX_BYTES = 1 * 1024 * 1024; // 日志轮转阈值：1MB
@@ -55,7 +54,7 @@ function rotateLog(): void {
   if (now - lastRotateCheckAt < LOG_ROTATE_CHECK_INTERVAL_MS) return;
   lastRotateCheckAt = now;
   try {
-    let stat;
+    let stat: ReturnType<typeof fs.statSync> | undefined;
     try {
       stat = fs.statSync(LOG_FILE);
     } catch {
@@ -66,14 +65,18 @@ function rotateLog(): void {
     fs.rmSync(`${LOG_FILE}.2`, { force: true });
     if (fs.existsSync(`${LOG_FILE}.1`)) fs.renameSync(`${LOG_FILE}.1`, `${LOG_FILE}.2`);
     fs.renameSync(LOG_FILE, `${LOG_FILE}.1`);
-  } catch { /* ignore */ }
+  } catch {
+    /* ignore */
+  }
 }
 
 function log(msg: string): void {
   try {
     rotateLog();
     fs.appendFileSync(LOG_FILE, `${new Date().toISOString()} ${msg}\n`);
-  } catch { /* ignore */ }
+  } catch {
+    /* ignore */
+  }
 }
 
 function projectIdOf(project: { id?: string } | undefined, directory: string): string {
@@ -81,10 +84,12 @@ function projectIdOf(project: { id?: string } | undefined, directory: string): s
   return path.basename(directory) || "default";
 }
 
-function textParts(parts: any[]): string {
+type TextPartLike = { type?: string; text?: unknown; synthetic?: boolean };
+
+function textParts(parts: TextPartLike[] | undefined): string {
   return (parts ?? [])
     .filter((p) => p?.type === "text" && typeof p.text === "string" && !p.synthetic)
-    .map((p) => p.text)
+    .map((p) => p.text as string)
     .join("\n");
 }
 
@@ -127,7 +132,10 @@ function looksLikeBashError(text: string): boolean {
 }
 
 function extractErrorSnippet(text: string): string {
-  const lines = text.split("\n").map((l) => l.trim()).filter(Boolean);
+  const lines = text
+    .split("\n")
+    .map((l) => l.trim())
+    .filter(Boolean);
   // 优先取含错误关键词的行，最多 3 行
   const errLines = lines.filter((l) => BASH_ERROR_PATTERNS.some((re) => re.test(l)));
   const picked = (errLines.length ? errLines : lines).slice(0, 3);
@@ -141,9 +149,7 @@ const plugin: Plugin = async ({ client, project, directory }) => {
   const store = new MemoryStore({});
   await store.loadFromDisk().catch((err) => log(`store load failed: ${String(err)}`));
 
-  store.setConsolidator((target, signal, projectId) =>
-    consolidateTarget(client, store, target, directory, projectId),
-  );
+  store.setConsolidator((target, _signal, projectId) => consolidateTarget(client, store, target, directory, projectId));
   setDebugLogger((msg) => log(msg));
 
   const currentProject = projectIdOf(project, directory);
@@ -169,7 +175,7 @@ const plugin: Plugin = async ({ client, project, directory }) => {
 
   return {
     // ─── L0 + policy injection into system prompt ───
-    "experimental.chat.system.transform": async (input, output) => {
+    "experimental.chat.system.transform": async (_input, output) => {
       try {
         systemTransformFired = true;
         const blocks: string[] = [MEMORY_POLICY_PROMPT];
@@ -199,7 +205,10 @@ const plugin: Plugin = async ({ client, project, directory }) => {
         if (match.matched) {
           // 检测基于首行，保存也应只存首行（避免混入后续任务内容）
           const snippet = userText.split("\n")[0].trim().slice(0, 300);
-          await store.addFailure(snippet, { category: "correction", project: currentProject });
+          await store.addFailure(snippet, {
+            category: "correction",
+            project: currentProject,
+          });
           log(`correction saved (${match.reason}): ${snippet.slice(0, 80)}`);
         }
 
@@ -215,9 +224,7 @@ const plugin: Plugin = async ({ client, project, directory }) => {
           const fresh = hits.filter((h) => h.score >= INJECT_SCORE_THRESHOLD);
           if (fresh.length > 0) {
             const injected = injectedThisSession.get(input.sessionID) ?? new Set<string>();
-            const toInject = fresh
-              .filter((h) => !injected.has(h.content.slice(0, 60)))
-              .slice(0, MAX_INJECT_PER_TURN);
+            const toInject = fresh.filter((h) => !injected.has(h.content.slice(0, 60))).slice(0, MAX_INJECT_PER_TURN);
             if (toInject.length > 0) {
               const block = [
                 "<memory-context>",
@@ -230,21 +237,27 @@ const plugin: Plugin = async ({ client, project, directory }) => {
                 "═══ END MEMORY ═══",
                 "</memory-context>",
               ].join("\n");
-              await client.session.prompt({
-                path: { id: input.sessionID },
-                body: {
-                  parts: [{
-                    id: `prt-memauto-${Date.now()}`,
-                    type: "text",
-                    text: block,
-                    synthetic: true,
-                  }],
-                  noReply: true,
-                },
-              }).catch((err) => log(`memory auto-inject failed: ${String(err)}`));
+              await client.session
+                .prompt({
+                  path: { id: input.sessionID },
+                  body: {
+                    parts: [
+                      {
+                        id: `prt-memauto-${Date.now()}`,
+                        type: "text",
+                        text: block,
+                        synthetic: true,
+                      },
+                    ],
+                    noReply: true,
+                  },
+                })
+                .catch((err) => log(`memory auto-inject failed: ${String(err)}`));
               for (const h of toInject) injected.add(h.content.slice(0, 60));
               injectedThisSession.set(input.sessionID, injected);
-              log(`memory auto-inject: ${toInject.length} hit(s) (scores=${toInject.map((h) => h.score.toFixed(1)).join(",")})`);
+              log(
+                `memory auto-inject: ${toInject.length} hit(s) (scores=${toInject.map((h) => h.score.toFixed(1)).join(",")})`,
+              );
             }
           }
         } catch (err) {
@@ -259,18 +272,22 @@ const plugin: Plugin = async ({ client, project, directory }) => {
           const projectBlock = store.formatProjectBlock(currentProject);
           if (projectBlock) blocks.push(projectBlock);
           if (blocks.length > 0) {
-            await client.session.prompt({
-              path: { id: input.sessionID },
-              body: {
-                parts: [{
-                  id: `prt-standing-${Date.now()}`,
-                  type: "text",
-                  text: blocks.join("\n\n"),
-                  synthetic: true,
-                }],
-                noReply: true,
-              },
-            }).catch((err) => log(`standing fallback inject failed: ${String(err)}`));
+            await client.session
+              .prompt({
+                path: { id: input.sessionID },
+                body: {
+                  parts: [
+                    {
+                      id: `prt-standing-${Date.now()}`,
+                      type: "text",
+                      text: blocks.join("\n\n"),
+                      synthetic: true,
+                    },
+                  ],
+                  noReply: true,
+                },
+              })
+              .catch((err) => log(`standing fallback inject failed: ${String(err)}`));
             systemTransformFired = true;
           }
         }
@@ -284,7 +301,7 @@ const plugin: Plugin = async ({ client, project, directory }) => {
       const event = input.event;
       if (event.type !== "session.idle") return;
       try {
-        const sessionID = (event.properties as any)?.sessionID as string | undefined;
+        const sessionID = (event.properties as { sessionID?: string } | undefined)?.sessionID;
         if (!sessionID) return;
         if (sessionID === lastIdleSession) return;
 
@@ -292,7 +309,9 @@ const plugin: Plugin = async ({ client, project, directory }) => {
         try {
           const info = await client.session.get({ path: { id: sessionID } });
           if (isInternalSession(info.data?.title)) return;
-        } catch { /* ignore */ }
+        } catch {
+          /* ignore */
+        }
 
         const turns = sessionTurns.get(sessionID) ?? 0;
         if (turns < NUDGE_INTERVAL) return;
@@ -310,14 +329,16 @@ const plugin: Plugin = async ({ client, project, directory }) => {
             // another review (per-session learning loop, not once-per-session).
             sessionTurns.set(sessionID, 0);
             if (result.savedCount > 0) {
-              await client.tui?.showToast({
-                body: {
-                  title: "Hermes Memory",
-                  message: `Saved ${result.savedCount} memory item(s) from this session`,
-                  variant: "info",
-                  duration: 4000,
-                },
-              }).catch(() => {});
+              await client.tui
+                ?.showToast({
+                  body: {
+                    title: "Hermes Memory",
+                    message: `Saved ${result.savedCount} memory item(s) from this session`,
+                    variant: "info",
+                    duration: 4000,
+                  },
+                })
+                .catch(() => {});
             }
           } catch (err) {
             log(`background review threw: ${String(err)}`);
@@ -339,7 +360,9 @@ const plugin: Plugin = async ({ client, project, directory }) => {
         const result = await runFlushReview(client, store, directory, currentProject, sessionID);
         log(`flush review: saved=${result.savedCount}${result.error ? ` err=${result.error}` : ""}`);
         if (result.savedCount > 0) {
-          output.context.push(`[hermes-memory] Flush review saved ${result.savedCount} durable memory item(s) before compaction.`);
+          output.context.push(
+            `[hermes-memory] Flush review saved ${result.savedCount} durable memory item(s) before compaction.`,
+          );
         }
       } catch (err) {
         log(`session.compacting error: ${String(err)}`);
@@ -378,18 +401,22 @@ const plugin: Plugin = async ({ client, project, directory }) => {
           "Use these to avoid repeating past mistakes.",
           "</memory-prefetch>",
         ].join("\n");
-        await client.session.prompt({
-          path: { id: input.sessionID },
-          body: {
-            parts: [{
-              id: `prt-memfetch-${Date.now()}`,
-              type: "text",
-              text: block,
-              synthetic: true,
-            }],
-            noReply: true,
-          },
-        }).catch((err) => log(`memory prefetch inject failed: ${String(err)}`));
+        await client.session
+          .prompt({
+            path: { id: input.sessionID },
+            body: {
+              parts: [
+                {
+                  id: `prt-memfetch-${Date.now()}`,
+                  type: "text",
+                  text: block,
+                  synthetic: true,
+                },
+              ],
+              noReply: true,
+            },
+          })
+          .catch((err) => log(`memory prefetch inject failed: ${String(err)}`));
         log(`memory prefetch: bash error → ${hits.length} failure hit(s) injected (cmd=${cmd.slice(0, 60)})`);
       } catch (err) {
         log(`tool.execute.after error: ${String(err)}`);
@@ -404,12 +431,15 @@ const plugin: Plugin = async ({ client, project, directory }) => {
           query: tool.schema.string().describe("Search terms (concrete words work best)."),
           target: tool.schema.enum(TARGETS).optional().describe("Which memory layer to search. Omit to search all."),
           category: tool.schema.enum(CATEGORIES).optional().describe("Only for target=failure: lesson category."),
-          project: tool.schema.string().optional().describe("Project scope for project memories (defaults to current project)."),
+          project: tool.schema
+            .string()
+            .optional()
+            .describe("Project scope for project memories (defaults to current project)."),
           limit: tool.schema.number().optional().describe("Max results (default 10)."),
         },
         async execute(args) {
           // target 省略（全目标）或为 project 时都带上项目记忆，与自动注入行为一致
-          const project = (args.target === "project" || !args.target) ? (args.project || currentProject) : undefined;
+          const project = args.target === "project" || !args.target ? args.project || currentProject : undefined;
           const hits = searchMemories(store, {
             query: args.query,
             target: args.target,
@@ -418,7 +448,12 @@ const plugin: Plugin = async ({ client, project, directory }) => {
             limit: Math.max(1, Math.min(Math.floor(args.limit ?? 10), 50)),
           });
           if (hits.length === 0) {
-            return JSON.stringify({ success: true, query: args.query, count: 0, results: [] });
+            return JSON.stringify({
+              success: true,
+              query: args.query,
+              count: 0,
+              results: [],
+            });
           }
           return JSON.stringify({
             success: true,
@@ -438,33 +473,61 @@ const plugin: Plugin = async ({ client, project, directory }) => {
         description: MEMORY_ADD_TOOL_DESCRIPTION,
         args: {
           content: tool.schema.string().describe("The durable fact to remember."),
-          target: tool.schema.enum(TARGETS).describe("user=profile, memory=global notes, project=repo-specific, failure=categorized lesson."),
+          target: tool.schema
+            .enum(TARGETS)
+            .describe("user=profile, memory=global notes, project=repo-specific, failure=categorized lesson."),
           category: tool.schema.enum(CATEGORIES).optional().describe("Required for target=failure."),
           failure_reason: tool.schema.string().optional().describe("Optional context for failure entries."),
-          project: tool.schema.string().optional().describe("Project name when target=project (defaults to current project); also used to scope failure entries."),
+          project: tool.schema
+            .string()
+            .optional()
+            .describe(
+              "Project name when target=project (defaults to current project); also used to scope failure entries.",
+            ),
         },
         async execute(args) {
           if (args.target === "project") {
             const project = args.project || currentProject;
             const r = await store.addToProject(project, args.content);
             log(`memory_add project=${project} success=${r.success} err=${r.error ?? ""}`);
-            return JSON.stringify({ success: r.success, message: r.message, error: r.error, usage: r.usage, entry_count: r.entry_count });
+            return JSON.stringify({
+              success: r.success,
+              message: r.message,
+              error: r.error,
+              usage: r.usage,
+              entry_count: r.entry_count,
+            });
           }
           const target = args.target as Target;
           if (target === "failure" && !args.category) {
-            return JSON.stringify({ success: false, error: "category is required for target=failure." });
+            return JSON.stringify({
+              success: false,
+              error: "category is required for target=failure.",
+            });
           }
           // category 只在 target=failure 时生效；其他目标即使误传了 category 也按普通 add 处理
-          const r = target === "failure" && args.category
-            ? await store.addFailure(args.content, { category: args.category as MemoryCategory, failureReason: args.failure_reason, project: args.project || currentProject })
-            : await store.add(target, args.content);
+          const r =
+            target === "failure" && args.category
+              ? await store.addFailure(args.content, {
+                  category: args.category as MemoryCategory,
+                  failureReason: args.failure_reason,
+                  project: args.project || currentProject,
+                })
+              : await store.add(target, args.content);
           log(`memory_add target=${target} success=${r.success} err=${r.error ?? ""}`);
-          return JSON.stringify({ success: r.success, message: r.message, error: r.error, usage: r.usage, entry_count: r.entry_count });
+          return JSON.stringify({
+            success: r.success,
+            message: r.message,
+            error: r.error,
+            usage: r.usage,
+            entry_count: r.entry_count,
+          });
         },
       }),
 
       memory_replace: tool({
-        description: "Replace an existing memory entry. old_text is matched exactly first (the full entry text or its [category] prefix), falling back to substring if no exact match. The old version is kept in evolution history (readable via memory_history).",
+        description:
+          "Replace an existing memory entry. old_text is matched exactly first (the full entry text or its [category] prefix), falling back to substring if no exact match. The old version is kept in evolution history (readable via memory_history).",
         args: {
           target: tool.schema.enum(TARGETS).describe("Which layer the entry lives in."),
           old_text: tool.schema.string().describe("Entry text to match (exact match preferred, substring fallback)."),
@@ -474,15 +537,26 @@ const plugin: Plugin = async ({ client, project, directory }) => {
         async execute(args) {
           if (args.target === "project") {
             const r = await store.replaceProjectEntry(args.project || currentProject, args.old_text, args.content);
-            return JSON.stringify({ success: r.success, message: r.message, error: r.error, matches: r.matches ?? null });
+            return JSON.stringify({
+              success: r.success,
+              message: r.message,
+              error: r.error,
+              matches: r.matches ?? null,
+            });
           }
           const r = await store.replace(args.target as Target, args.old_text, args.content);
-          return JSON.stringify({ success: r.success, message: r.message, error: r.error, matches: r.matches ?? null });
+          return JSON.stringify({
+            success: r.success,
+            message: r.message,
+            error: r.error,
+            matches: r.matches ?? null,
+          });
         },
       }),
 
       memory_remove: tool({
-        description: "Remove a memory entry. old_text is matched exactly first (the full entry text or its [category] prefix), falling back to substring if no exact match.",
+        description:
+          "Remove a memory entry. old_text is matched exactly first (the full entry text or its [category] prefix), falling back to substring if no exact match.",
         args: {
           target: tool.schema.enum(TARGETS).describe("Which layer the entry lives in."),
           old_text: tool.schema.string().describe("Entry text to match (exact match preferred, substring fallback)."),
@@ -491,15 +565,26 @@ const plugin: Plugin = async ({ client, project, directory }) => {
         async execute(args) {
           if (args.target === "project") {
             const r = await store.removeProjectEntry(args.project || currentProject, args.old_text);
-            return JSON.stringify({ success: r.success, message: r.message, error: r.error, matches: r.matches ?? null });
+            return JSON.stringify({
+              success: r.success,
+              message: r.message,
+              error: r.error,
+              matches: r.matches ?? null,
+            });
           }
           const r = await store.remove(args.target as Target, args.old_text);
-          return JSON.stringify({ success: r.success, message: r.message, error: r.error, matches: r.matches ?? null });
+          return JSON.stringify({
+            success: r.success,
+            message: r.message,
+            error: r.error,
+            matches: r.matches ?? null,
+          });
         },
       }),
 
       memory_history: tool({
-        description: "Read the evolution history of replaced memory entries (superseded versions kept by memory_replace). Use when you need to trace how a fact was configured before, or what an entry looked like before it was replaced. Read-only.",
+        description:
+          "Read the evolution history of replaced memory entries (superseded versions kept by memory_replace). Use when you need to trace how a fact was configured before, or what an entry looked like before it was replaced. Read-only.",
         args: {
           query: tool.schema.string().optional().describe("Optional substring to filter history entries by."),
           limit: tool.schema.number().optional().describe("Max entries to return (default 20)."),
@@ -515,9 +600,7 @@ const plugin: Plugin = async ({ client, project, directory }) => {
           try {
             const entries = raw ? splitEntries(raw) : [];
             const query = args.query ?? "";
-            const filtered = query
-              ? entries.filter((e) => e.includes(query))
-              : entries;
+            const filtered = query ? entries.filter((e) => e.includes(query)) : entries;
             const limit = Math.max(1, Math.min(Math.floor(args.limit ?? 20), 50));
             const picked = filtered.slice(-limit);
             return JSON.stringify({

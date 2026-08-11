@@ -7,21 +7,22 @@
  *  - auto-consolidate.ts   → capacity overflow → LLM consolidation → shrink
  *  - session-flush.ts      → compaction → save what matters
  */
+
+import * as fs from "node:fs/promises";
 import type { PluginInput } from "@opencode-ai/plugin";
-import type { MemoryStore, Target, MemoryMutationOperation, MemoryCategory } from "./store.ts";
-import {
-  DIRECT_REVIEW_SYSTEM_PROMPT,
-  DIRECT_CONSOLIDATION_SYSTEM_PROMPT,
-  DIRECT_FLUSH_SYSTEM_PROMPT,
-  CORRECTION_STRONG_PATTERNS,
-  CORRECTION_WEAK_PATTERNS,
-  CORRECTION_NEGATIVE_PATTERNS,
-  CORRECTION_DIRECTIVE_WORDS,
-  REVIEW_USER_PROMPT,
-} from "./prompts.ts";
 import { completeWithInternalSession, isInternalSession } from "./llm.ts";
 import { consolidateStateFile } from "./paths.ts";
-import * as fs from "node:fs/promises";
+import {
+  CORRECTION_DIRECTIVE_WORDS,
+  CORRECTION_NEGATIVE_PATTERNS,
+  CORRECTION_STRONG_PATTERNS,
+  CORRECTION_WEAK_PATTERNS,
+  DIRECT_CONSOLIDATION_SYSTEM_PROMPT,
+  DIRECT_FLUSH_SYSTEM_PROMPT,
+  DIRECT_REVIEW_SYSTEM_PROMPT,
+  REVIEW_USER_PROMPT,
+} from "./prompts.ts";
+import type { MemoryMutationOperation, MemoryStore, Target } from "./store.ts";
 
 // ─── Correction detection (rule-based, zero LLM cost) ───
 export type CorrectionMatch = {
@@ -40,7 +41,7 @@ export function detectCorrection(text: string): CorrectionMatch {
   if (weak) {
     const rest = firstLine.replace(weak, "").trim();
     const hasDirective = CORRECTION_DIRECTIVE_WORDS.some((word) =>
-      new RegExp(`\\b${word.replace("'", "['']?")}\\b`, "i").test(rest)
+      new RegExp(`\\b${word.replace("'", "['']?")}\\b`, "i").test(rest),
     );
     if (hasDirective) return { matched: true, reason: "weak-pattern+directive" };
   }
@@ -48,23 +49,32 @@ export function detectCorrection(text: string): CorrectionMatch {
 }
 
 // ─── Operations extraction from LLM JSON output ───
+type RawOperation = { action?: unknown; [key: string]: unknown };
+
 function opsFromParsed(parsed: unknown): MemoryMutationOperation[] {
-  const rawOps = Array.isArray(parsed) ? parsed : (parsed as any)?.operations;
+  const rawOps = Array.isArray(parsed) ? parsed : (parsed as RawOperation | null)?.operations;
   const ops = Array.isArray(rawOps) ? rawOps : [];
   // 允许缺 target（applyOperations 有 "memory" 默认值）；必须至少有 action
-  return ops.filter((op: any) => op && typeof op === "object" && op.action);
+  return ops.filter((op): op is MemoryMutationOperation => {
+    if (!op || typeof op !== "object") return false;
+    const candidate = op as RawOperation;
+    return typeof candidate.action === "string" && candidate.action.length > 0;
+  });
 }
 
-export function extractOperations(text: string): { operations: MemoryMutationOperation[]; error?: string } {
-  const cleaned = text
-    .replace(/```(?:json)?/gi, "")
-    .trim();
+export function extractOperations(text: string): {
+  operations: MemoryMutationOperation[];
+  error?: string;
+} {
+  const cleaned = text.replace(/```(?:json)?/gi, "").trim();
   // 优先整体解析（content 含 { } 时 first/last 大括号定位会截断 JSON）
   try {
     const parsed = JSON.parse(cleaned);
     const ops = opsFromParsed(parsed);
     return { operations: ops };
-  } catch { /* fall through to brace-slice */ }
+  } catch {
+    /* fall through to brace-slice */
+  }
 
   const start = cleaned.indexOf("{");
   const end = cleaned.lastIndexOf("}");
@@ -84,8 +94,13 @@ export function extractOperations(text: string): { operations: MemoryMutationOpe
       const parsed = JSON.parse(repaired);
       const ops = opsFromParsed(parsed);
       if (ops.length > 0) return { operations: ops };
-    } catch { /* 修复失败，返回原始错误 */ }
-    return { operations: [], error: `Failed to parse operations JSON: ${String(err)}` };
+    } catch {
+      /* 修复失败，返回原始错误 */
+    }
+    return {
+      operations: [],
+      error: `Failed to parse operations JSON: ${String(err)}`,
+    };
   }
 }
 
@@ -169,7 +184,10 @@ export async function runBackgroundReview(
     reviewedUpTo.set(sessionID, all.length);
     if (operations.length === 0) return { savedCount: 0 };
     const applied = await applyOperations(store, operations);
-    return { savedCount: operations.length - applied.errors.length, error: applied.errors.join("; ") || undefined };
+    return {
+      savedCount: operations.length - applied.errors.length,
+      error: applied.errors.join("; ") || undefined,
+    };
   } catch (err) {
     return { savedCount: 0, error: String(err) };
   }
@@ -198,7 +216,10 @@ export async function runFlushReview(
     if (error) return { savedCount: 0, error };
     if (operations.length === 0) return { savedCount: 0 };
     const applied = await applyOperations(store, operations);
-    return { savedCount: operations.length - applied.errors.length, error: applied.errors.join("; ") || undefined };
+    return {
+      savedCount: operations.length - applied.errors.length,
+      error: applied.errors.join("; ") || undefined,
+    };
   } catch (err) {
     return { savedCount: 0, error: String(err) };
   }
@@ -233,11 +254,6 @@ function targetKey(target: Target | "project", projectId?: string): string {
   return projectId ? `project:${projectId}` : target;
 }
 
-/** 类型守卫：target === "project" 时收窄为 project 分支（配合 projectId 使用） */
-function isProjectTarget(target: Target | "project"): target is "project" {
-  return target === "project";
-}
-
 export async function consolidateTarget(
   client: PluginInput["client"],
   store: MemoryStore,
@@ -252,7 +268,11 @@ export async function consolidateTarget(
     const lastTime = Date.parse(last);
     if (!Number.isNaN(lastTime) && Date.now() - lastTime < CONSOLIDATE_COOLDOWN_MS) {
       const hoursLeft = Math.ceil((CONSOLIDATE_COOLDOWN_MS - (Date.now() - lastTime)) / 3_600_000);
-      return { consolidated: false, deferred: true, error: `Consolidation for '${key}' ran less than 24h ago (${hoursLeft}h left). Skipping to avoid churn.` };
+      return {
+        consolidated: false,
+        deferred: true,
+        error: `Consolidation for '${key}' ran less than 24h ago (${hoursLeft}h left). Skipping to avoid churn.`,
+      };
     }
   }
 
@@ -262,9 +282,7 @@ export async function consolidateTarget(
   state[key] = new Date().toISOString();
   await writeConsolidateState(state);
 
-  const rawEntries = projectId
-    ? store.getRawProjectEntries(projectId)
-    : store.getRawEntriesFor(target as Target);
+  const rawEntries = projectId ? store.getRawProjectEntries(projectId) : store.getRawEntriesFor(target as Target);
   if (rawEntries.length < 2) {
     return { consolidated: false, error: "Too few entries to consolidate." };
   }
@@ -277,7 +295,10 @@ export async function consolidateTarget(
   );
   logDebug(`consolidate ${key}: completion=${completion.text.length > 0} err=${completion.error ?? "none"}`);
   if (completion.error || !completion.text) {
-    return { consolidated: false, error: completion.error || "empty model output" };
+    return {
+      consolidated: false,
+      error: completion.error || "empty model output",
+    };
   }
   const { operations, error } = extractOperations(completion.text);
   logDebug(`consolidate ${key}: ops=${operations.length} parseErr=${error ?? "none"}`);
@@ -287,7 +308,11 @@ export async function consolidateTarget(
   const scoped = operations
     .filter((op) => op.target === target || op.target === undefined)
     .map((op) => ({ ...op, target }));
-  if (scoped.length === 0) return { consolidated: false, error: "No operations scoped to this target." };
+  if (scoped.length === 0)
+    return {
+      consolidated: false,
+      error: "No operations scoped to this target.",
+    };
 
   // 过度删除保护：remove 操作数不得超过条目总数的一半（保守化兜底，floor 取整更严格）
   const removeCount = scoped.filter((op) => op.action === "remove").length;
@@ -300,7 +325,9 @@ export async function consolidateTarget(
 
   const result = projectId
     ? await applyProjectConsolidation(store, projectId, scoped)
-    : await store.applyMutationPlan(target as Target, scoped, { requireShrink: true });
+    : await store.applyMutationPlan(target as Target, scoped, {
+        requireShrink: true,
+      });
   if (!result.success) return { consolidated: false, error: result.error };
 
   // project 分支没有 applyMutationPlan 的 requireShrink，这里手动验证：
@@ -308,7 +335,10 @@ export async function consolidateTarget(
   if (projectId) {
     const after = store.getRawProjectEntries(projectId).join("\n§\n").length;
     if (after >= currentText.length) {
-      return { consolidated: false, error: `Consolidation did not shrink project memory (${currentText.length} -> ${after} chars).` };
+      return {
+        consolidated: false,
+        error: `Consolidation did not shrink project memory (${currentText.length} -> ${after} chars).`,
+      };
     }
   }
 
@@ -324,13 +354,25 @@ async function applyProjectConsolidation(
   for (const op of operations) {
     if (op.action === "add") {
       const r = await store.addToProject(projectId, op.content ?? "");
-      if (!r.success) return { success: false, error: `project ${projectId} add: ${r.error}` };
+      if (!r.success)
+        return {
+          success: false,
+          error: `project ${projectId} add: ${r.error}`,
+        };
     } else if (op.action === "replace") {
       const r = await store.replaceProjectEntry(projectId, op.old_text ?? "", op.content ?? "");
-      if (!r.success) return { success: false, error: `project ${projectId} replace: ${r.error}` };
+      if (!r.success)
+        return {
+          success: false,
+          error: `project ${projectId} replace: ${r.error}`,
+        };
     } else if (op.action === "remove") {
       const r = await store.removeProjectEntry(projectId, op.old_text ?? "");
-      if (!r.success) return { success: false, error: `project ${projectId} remove: ${r.error}` };
+      if (!r.success)
+        return {
+          success: false,
+          error: `project ${projectId} remove: ${r.error}`,
+        };
     }
   }
   return { success: true };
@@ -341,8 +383,14 @@ function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promi
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error(message)), ms);
     promise.then(
-      (v) => { clearTimeout(timer); resolve(v); },
-      (e) => { clearTimeout(timer); reject(e); },
+      (v) => {
+        clearTimeout(timer);
+        resolve(v);
+      },
+      (e) => {
+        clearTimeout(timer);
+        reject(e);
+      },
     );
   });
 }
