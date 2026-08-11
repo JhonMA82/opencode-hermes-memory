@@ -18,8 +18,6 @@ export const DEFAULT_PROJECT_CHAR_LIMIT = 20000;
 
 // ─── Learning loop defaults ───
 export const DEFAULT_NUDGE_INTERVAL = 10; // turns between background reviews
-export const DEFAULT_FAILURE_INJECTION_MAX_AGE_DAYS = 7;
-export const DEFAULT_FAILURE_INJECTION_MAX_ENTRIES = 5;
 
 // ─── Standing instructions (#121) ───
 export const STANDING_MAX_ENTRIES = 20;

@@ -4,6 +4,14 @@
 
 ## [Unreleased]
 
+### Fixed
+- consolidate 冷却时间不再被"条目太少"的无操作检查消耗（<2 条直接返回，不占 24h 冷却）
+
+### Changed
+- 删除死代码链：`formatForSystemPrompt`（无调用方）及其独占的 `snapshot`/`refreshSnapshot`/`renderBlock`/`getFailureEntries`/`getAllFailureEntries`/failure-injection 配置项，以及无调用方的 `loadStanding`/`getStanding`
+- 回归测试新增 `extractOperations` 解析容错断言（fenced JSON / 尾逗号修复 / 无 JSON 报错 / 数组形式），21 → 25
+- 测试 teardown 等待 fire-and-forget 落盘完成，消除竞态噪音
+
 ## [0.3.0] - 2026-08-11
 
 ### Fixed

@@ -4,7 +4,7 @@
  * Ported from pi-hermes-memory (src/store/memory-store.ts), which was ported
  * from Hermes agent (tools/memory_tool.py). Simplified for OpenCode: same
  * §-delimited Markdown entries with HTML-comment metadata, dedup, char limits,
- * atomic writes with external-change detection, frozen snapshot for injection.
+ * atomic writes with external-change detection.
  *
  * Targets: "memory" (MEMORY.md), "user" (USER.md), "failure" (failures.md).
  * Project memory lives in projects-memory/<id>/MEMORY.md and is managed
@@ -25,8 +25,6 @@ import {
   userFile,
 } from "./paths.ts";
 import {
-  DEFAULT_FAILURE_INJECTION_MAX_AGE_DAYS,
-  DEFAULT_FAILURE_INJECTION_MAX_ENTRIES,
   DEFAULT_MEMORY_CHAR_LIMIT,
   DEFAULT_PROJECT_CHAR_LIMIT,
   DEFAULT_USER_CHAR_LIMIT,
@@ -90,7 +88,6 @@ export class MemoryStore {
   private failureEntries: string[] = [];
   private projectEntries = new Map<string, string[]>();
   private fingerprints = new Map<string, string>();
-  private snapshot = { memory: "", user: "" };
   private standing: string[] = [];
   private consolidator:
     | ((target: Target | "project", signal?: AbortSignal, projectId?: string) => Promise<ConsolidationResult>)
@@ -101,9 +98,6 @@ export class MemoryStore {
       memoryCharLimit?: number;
       userCharLimit?: number;
       projectCharLimit?: number;
-      failureInjectionEnabled?: boolean;
-      failureInjectionMaxAgeDays?: number;
-      failureInjectionMaxEntries?: number;
       overflowStrategy?: OverflowStrategy;
     } = {},
   ) {}
@@ -159,22 +153,9 @@ export class MemoryStore {
       this.fingerprints.set(this.pathFor(target), await this.fileFingerprint(this.pathFor(target)));
     }
     this.standing = await this.readStanding();
-    this.refreshSnapshot();
-  }
-
-  private refreshSnapshot(): void {
-    const strippedMemory = this.memoryEntries.map((e) => this.stripMetadata(e));
-    const strippedUser = this.userEntries.map((e) => this.stripMetadata(e));
-    this.snapshot = {
-      memory: this.renderBlock("memory", strippedMemory),
-      user: this.renderBlock("user", strippedUser),
-    };
   }
 
   // ─── Standing instructions ───
-  async loadStanding(): Promise<void> {
-    this.standing = await this.readStanding();
-  }
   private async readStanding(): Promise<string[]> {
     try {
       const raw = await fs.readFile(standingFile(), "utf-8");
@@ -183,9 +164,6 @@ export class MemoryStore {
       if ((e as NodeJS.ErrnoException).code === "ENOENT") return [];
       throw e;
     }
-  }
-  getStanding(): string[] {
-    return [...this.standing];
   }
   formatStandingForPrompt(): string {
     if (!this.standing.length) return "";
@@ -229,7 +207,6 @@ export class MemoryStore {
     const entries = await this.readEntries(target);
     this.setEntries(target, [...new Set(entries)]);
     this.fingerprints.set(filePath, current);
-    this.refreshSnapshot();
   }
 
   private async saveToDisk(target: Target, entries: string[]): Promise<void> {
@@ -239,7 +216,6 @@ export class MemoryStore {
     await atomicWrite(filePath, content, expectedFingerprint);
     this.fingerprints.set(filePath, createHash("sha256").update(content).digest("hex"));
     this.setEntries(target, entries);
-    this.refreshSnapshot();
   }
 
   // ─── Metadata encode / decode ───
@@ -1000,23 +976,6 @@ export class MemoryStore {
     return this.fenceBlock(`${separator}\n${header}\n${separator}\n${content}`);
   }
 
-  // ─── Snapshot for legacy full injection ───
-  formatForSystemPrompt(): string {
-    const parts: string[] = [];
-    if (this.snapshot.memory) parts.push(this.fenceBlock(this.snapshot.memory));
-    if (this.snapshot.user) parts.push(this.fenceBlock(this.snapshot.user));
-    if (this.opts.failureInjectionEnabled !== false) {
-      const maxAge = this.opts.failureInjectionMaxAgeDays ?? DEFAULT_FAILURE_INJECTION_MAX_AGE_DAYS;
-      const maxEntries = this.opts.failureInjectionMaxEntries ?? DEFAULT_FAILURE_INJECTION_MAX_ENTRIES;
-      const recent = this.getFailureEntries(maxAge).slice(0, maxEntries);
-      if (recent.length) {
-        const header = "RECENT FAILURES & LESSONS (learn from these):";
-        parts.push(this.fenceBlock(`${header}\n${recent.map((e) => `• ${e}`).join("\n")}`));
-      }
-    }
-    return parts.join("\n\n");
-  }
-
   fenceBlock(block: string): string {
     if (!block) return "";
     return [
@@ -1033,21 +992,6 @@ export class MemoryStore {
   }
 
   // ─── Accessors ───
-  getFailureEntries(maxAgeDays = 7): string[] {
-    const cutoff = new Date();
-    cutoff.setDate(cutoff.getDate() - maxAgeDays);
-    const cutoffStr = cutoff.toISOString().split("T")[0];
-    return this.failureEntries
-      .filter((e) => {
-        const d = this.decodeEntry(e);
-        return d.created >= cutoffStr;
-      })
-      .map((e) => this.stripMetadata(e));
-  }
-
-  getAllFailureEntries(): string[] {
-    return this.failureEntries.map((e) => this.stripMetadata(e));
-  }
   getMemoryEntries(): string[] {
     return this.memoryEntries.map((e) => this.stripMetadata(e));
   }
@@ -1137,20 +1081,6 @@ export class MemoryStore {
         }
       }
     }
-  }
-
-  private renderBlock(target: "memory" | "user", entries: string[]): string {
-    if (!entries.length) return "";
-    const limit = this.charLimit(target);
-    const content = entries.join(ENTRY_DELIMITER);
-    const current = content.length;
-    const pct = limit > 0 ? Math.min(100, Math.floor((current / limit) * 100)) : 0;
-    const header =
-      target === "user"
-        ? `USER PROFILE (who the user is) [${pct}% — ${current}/${limit} chars]`
-        : `MEMORY (your personal notes) [${pct}% — ${current}/${limit} chars]`;
-    const separator = "═".repeat(46);
-    return `${separator}\n${header}\n${separator}\n${content}`;
   }
 }
 

@@ -10,7 +10,7 @@
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { detectCorrection } from "../learn.ts";
+import { detectCorrection, extractOperations } from "../learn.ts";
 import { setMemoryRoot } from "../paths.ts";
 import { searchMemories } from "../search.ts";
 import { MemoryStore } from "../store.ts";
@@ -133,7 +133,19 @@ const today = new Date().toISOString().split("T")[0];
 assert("touch 后 last= 刷新到今天", rawAfterTouch.includes(`last=${today}`), rawAfterTouch);
 assert("touch 后 supersedes 元数据保留", rawAfterTouch.includes(`supersedes=${legacySupersedes}`), rawAfterTouch);
 
+// 12. extractOperations 解析容错（LLM 输出不保证是干净 JSON）
+const fenced = extractOperations('```json\n{"operations":[{"action":"add","target":"memory","content":"x"}]}\n```');
+assert("fenced JSON 解析", fenced.operations.length === 1 && !fenced.error, fenced.error ?? "");
+const trailingComma = extractOperations('{"operations":[{"action":"add","content":"x",}]}');
+assert("尾逗号修复解析", trailingComma.operations.length === 1, trailingComma.error ?? "");
+const noJson = extractOperations("抱歉，我无法处理这个请求。");
+assert("无 JSON 报错", noJson.operations.length === 0 && !!noJson.error);
+const arrayForm = extractOperations('[{"action":"remove","old_text":"y"}]');
+assert("数组形式解析", arrayForm.operations.length === 1, arrayForm.error ?? "");
+
 // ─── 清理临时目录 ───
+// touchEntry 是 fire-and-forget 异步落盘，等一拍再 rm，避免 teardown 竞态噪音
+await new Promise((r) => setTimeout(r, 100));
 await fs.rm(TMP, { recursive: true, force: true });
 
 // ─── 结论 ───

@@ -276,16 +276,17 @@ export async function consolidateTarget(
     }
   }
 
+  // 条目太少直接返回——这是一次无操作而非失败尝试，不占 24h 冷却
+  const rawEntries = projectId ? store.getRawProjectEntries(projectId) : store.getRawEntriesFor(target as Target);
+  if (rawEntries.length < 2) {
+    return { consolidated: false, error: "Too few entries to consolidate." };
+  }
+
   // 提前"占坑"写入冷却时间：consolidate 内部会调 applyMutationPlan，
   // 若其超限再触发 consolidate 会命中此处冷却，防止嵌套递归。
   // 失败也占冷却——一次尝试失败后 24h 内不再重试，避免反复烧 LLM。
   state[key] = new Date().toISOString();
   await writeConsolidateState(state);
-
-  const rawEntries = projectId ? store.getRawProjectEntries(projectId) : store.getRawEntriesFor(target as Target);
-  if (rawEntries.length < 2) {
-    return { consolidated: false, error: "Too few entries to consolidate." };
-  }
   const currentText = rawEntries.join("\n§\n");
   const userPrompt = `Target: ${key}\n\nCurrent entries (with metadata):\n${currentText}\n\nRespond with the operations JSON only. Use target "${target}" for every operation.`;
   const completion = await withTimeout(
