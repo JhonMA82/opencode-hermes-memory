@@ -4,6 +4,9 @@
   "description": "Layered persistent memory plugin for OpenCode — ported from Hermes agent",
   "type": "module",
   "main": "hermes-memory.ts",
+  "exports": {
+    "./server": "./hermes-memory.ts"
+  },
   "files": [
     "hermes-memory.ts",
     "hermes-memory-lib"
@@ -22,8 +25,21 @@
     "llm"
   ],
   "license": "MIT",
+  "author": {
+    "name": "realchendahuang",
+    "url": "https://github.com/realchendahuang"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/realchendahuang/opencode-hermes-memory.git"
+  },
+  "bugs": {
+    "url": "https://github.com/realchendahuang/opencode-hermes-memory/issues"
+  },
+  "homepage": "https://github.com/realchendahuang/opencode-hermes-memory#readme",
   "engines": {
-    "bun": ">=1.0.0"
+    "bun": ">=1.0.0",
+    "opencode": ">=1.18.0"
   },
   "peerDependencies": {
     "@opencode-ai/plugin": "^1.18.0"

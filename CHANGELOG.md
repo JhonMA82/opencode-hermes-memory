@@ -11,6 +11,11 @@
 - Issue / PR 模板
 - **GitHub 直装支持**：`opencode plugin github:realchendahuang/opencode-hermes-memory` 一键安装（无需 npm），README 已更新为官方安装方式
 
+### Changed
+- package.json：新增 `exports["./server"]` 入口（OpenCode loader 优先解析）、`repository`/`bugs`/`homepage`/`author` 元数据、`engines.opencode` 兼容性声明
+- CI：`bun install --frozen-lockfile` 保证可复现构建
+- README 徽章：硬编码测试数改为 GitHub Actions 动态 CI 徽章
+
 ### Fixed
 - 类型检查全绿：修复 `@opencode-ai/plugin` SDK 类型差异（`Message.summary` 对象化、`Part` 结构变化）与 `Target | "project"` 联合类型收窄问题
 - `tests/regression.ts` 绝对路径改为相对路径（`import.meta.url` 无关，直接相对引用）

@@ -6,7 +6,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Version](https://img.shields.io/github/v/release/realchendahuang/opencode-hermes-memory?sort=semver)](https://github.com/realchendahuang/opencode-hermes-memory/releases)
-[![Tests](https://img.shields.io/badge/tests-18%20passed-brightgreen)](hermes-memory-lib/tests/regression.ts)
+[![CI](https://img.shields.io/github/actions/workflow/status/realchendahuang/opencode-hermes-memory/ci.yml?branch=main&label=CI)](https://github.com/realchendahuang/opencode-hermes-memory/actions)
 [![OpenCode Plugin](https://img.shields.io/badge/OpenCode-Plugin-4B32C3)](https://opencode.ai)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
 
