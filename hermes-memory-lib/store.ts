@@ -1076,7 +1076,15 @@ export class MemoryStore {
       const decoded = this.decodeEntry(rawEntry);
       const today = todayStr();
       if (decoded.lastReferenced === today) return; // 同一天已 touch，跳过
-      const updated = this.encodeEntry(decoded.text, decoded.created, today, decoded.project ?? undefined);
+      // 必须透传 superseded/supersedes——漏掉会把 replace 留下的演化链元数据抹掉
+      const updated = this.encodeEntry(
+        decoded.text,
+        decoded.created,
+        today,
+        decoded.project ?? undefined,
+        decoded.superseded,
+        decoded.supersedes,
+      );
 
       if (target === "project") {
         if (!projectId) return;

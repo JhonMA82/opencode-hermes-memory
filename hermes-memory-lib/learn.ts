@@ -173,7 +173,7 @@ export async function runBackgroundReview(
     const transcript = buildTranscript(fresh);
     if (!transcript.trim()) return { savedCount: 0 };
 
-    const userPrompt = `${REVIEW_USER_PROMPT}\n\n<conversation>\n${transcript}\n</conversation>\n\nActive project: ${projectId || "(none)"}\nRespond with the operations JSON only.`;
+    const userPrompt = `${REVIEW_USER_PROMPT}\n\n<conversation>\n${transcript}\n</conversation>\n\n${existingMemorySection(store, projectId)}Active project: ${projectId || "(none)"}\nRespond with the operations JSON only.`;
     const completion = await completeWithInternalSession(client, directory, DIRECT_REVIEW_SYSTEM_PROMPT, userPrompt);
     if (completion.error || !completion.text) {
       return { savedCount: 0, error: completion.error || "empty model output" };
@@ -401,12 +401,34 @@ export function setDebugLogger(fn: (msg: string) => void): void {
   logDebug = fn;
 }
 
+/** 清理单个会话的状态（session.deleted 时调用） */
+export function clearSession(sessionID: string): void {
+  reviewedUpTo.delete(sessionID);
+}
+
 /** 清理会话级状态（插件 dispose 时调用，防 Map 无限增长） */
 export function clearSessionState(): void {
   reviewedUpTo.clear();
 }
 
 // ─── Transcript builder ───
+/** 已有记忆清单注入上限：让审查模型知道哪些事实已存，避免重复保存烧容量 */
+const EXISTING_MEMORY_MAX_CHARS = 4000;
+
+/** 列出当前已存记忆（memory+user+project，剥元数据），供审查模型去重。 */
+function existingMemorySection(store: MemoryStore, projectId: string): string {
+  const lines = [...store.getMemoryEntries(), ...store.getUserEntries(), ...store.getProjectEntries(projectId)].filter(
+    Boolean,
+  );
+  if (lines.length === 0) return "";
+  let listing = "";
+  for (const line of lines) {
+    if (listing.length + line.length + 3 > EXISTING_MEMORY_MAX_CHARS) break;
+    listing += `- ${line}\n`;
+  }
+  return `<existing-memory>\n${listing}</existing-memory>\n\n`;
+}
+
 // info.summary 用 unknown：OpenCode SDK 的 Message.summary 是对象（{title, body, diffs}），
 // 而旧版是 boolean；truthy 判断对两者都成立，行为一致。
 type MessageLike = {

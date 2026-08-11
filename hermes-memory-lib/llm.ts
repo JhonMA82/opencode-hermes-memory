@@ -11,6 +11,15 @@ import type { PluginInput } from "@opencode-ai/plugin";
 
 export const INTERNAL_SESSION_TITLE = "[hm-internal]";
 
+/** 本进程创建的内部会话 ID（创建时登记、删除时移除）。
+ *  chat.message 等钩子用它同步跳过内部会话，避免审查 prompt 触发
+ *  纠正检测/记忆自动注入/轮次计数（标题检查需要异步 session.get，太贵）。 */
+const internalSessionIDs = new Set<string>();
+
+export function isInternalSessionId(sessionID: string | undefined | null): boolean {
+  return typeof sessionID === "string" && internalSessionIDs.has(sessionID);
+}
+
 export function isInternalSession(title: string | undefined | null): boolean {
   return typeof title === "string" && title.startsWith(INTERNAL_SESSION_TITLE);
 }
@@ -39,6 +48,7 @@ export async function completeWithInternalSession(
     });
     sessionID = created.data?.id;
     if (!sessionID) return { text: "", error: "Failed to create internal session" };
+    internalSessionIDs.add(sessionID);
 
     const resp = await client.session.prompt({
       path: { id: sessionID },
@@ -60,6 +70,7 @@ export async function completeWithInternalSession(
     return { text: "", error: String(err) };
   } finally {
     if (sessionID) {
+      internalSessionIDs.delete(sessionID);
       try {
         await client.session.delete({ path: { id: sessionID } });
       } catch (err) {

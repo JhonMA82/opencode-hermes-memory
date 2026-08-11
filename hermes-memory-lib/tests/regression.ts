@@ -1,7 +1,7 @@
 /**
  * Hermes 记忆系统隔离回归测试（标准模板）
  *
- * 用法：bun run /tmp/hm-isolated-regression.ts
+ * 用法：bun run test（即 bun run hermes-memory-lib/tests/regression.ts）
  *
  * 隔离原理：setMemoryRoot(临时目录) 让 MemoryStore 的所有路径指向临时目录，
  * 测试全程不触碰真实记忆文件（~/.config/opencode/memory/）。
@@ -116,6 +116,22 @@ r = await store.replaceProjectEntry("proj-test", "项目记忆条目", "项目�
 assert("replaceProjectEntry", r.success, r.error ?? "");
 r = await store.removeProjectEntry("proj-test", "项目记忆条目-更新");
 assert("removeProjectEntry", r.success, r.error ?? "");
+
+// 11. touchEntry 保留 supersedes 演化链元数据（检索命中刷新 last= 不得丢元数据）。
+// 当天创建的条目 touch 会跳过刷新路径，因此构造一条 last 为旧日期的条目。
+const legacySupersedes = Buffer.from("2026-01-01:旧摘要", "utf-8").toString("base64url");
+await fs.writeFile(
+  path.join(TMP, "MEMORY.md"),
+  `演化链条目-新 <!-- created=2026-01-01, last=2026-01-01, supersedes=${legacySupersedes} -->`,
+  "utf-8",
+);
+await store.loadFromDisk();
+const touchHits = searchMemories(store, { query: "演化链条目", limit: 5 }); // touch 默认 true
+assert("检索命中触发 touch", touchHits.length > 0);
+const rawAfterTouch = store.getRawEntriesFor("memory").find((e) => e.includes("演化链条目-新")) ?? "";
+const today = new Date().toISOString().split("T")[0];
+assert("touch 后 last= 刷新到今天", rawAfterTouch.includes(`last=${today}`), rawAfterTouch);
+assert("touch 后 supersedes 元数据保留", rawAfterTouch.includes(`supersedes=${legacySupersedes}`), rawAfterTouch);
 
 // ─── 清理临时目录 ───
 await fs.rm(TMP, { recursive: true, force: true });

@@ -231,5 +231,6 @@ Consider:
 5. Project-specific facts (architecture decisions, commands, package manager, repo workflows) — save to target "project".
 
 Skip: task progress, session outcomes, one-off explanations, anything unlikely to matter in a future session.
+Do NOT save facts already covered by the <existing-memory> list below (if present) — duplicates waste capacity.
 
 Return the operations JSON.`;

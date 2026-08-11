@@ -1,6 +1,6 @@
 {
   "name": "opencode-hermes-memory",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Layered persistent memory plugin for OpenCode — ported from Hermes agent",
   "type": "module",
   "main": "hermes-memory.ts",
