@@ -9,6 +9,7 @@
 - 项目元数据：package.json、tsconfig.json
 - CI：GitHub Actions 测试 workflow
 - Issue / PR 模板
+- **GitHub 直装支持**：`opencode plugin github:realchendahuang/opencode-hermes-memory` 一键安装（无需 npm），README 已更新为官方安装方式
 
 ### Fixed
 - 类型检查全绿：修复 `@opencode-ai/plugin` SDK 类型差异（`Message.summary` 对象化、`Part` 结构变化）与 `Target | "project"` 联合类型收窄问题

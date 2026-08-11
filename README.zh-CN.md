@@ -30,7 +30,21 @@
 
 ## 🚀 快速开始
 
-### 1. 安装插件
+### 从 GitHub 安装（推荐）
+
+```bash
+opencode plugin github:realchendahuang/opencode-hermes-memory
+```
+
+一条命令搞定——OpenCode 自动从 GitHub 下载插件、安装并写入配置。重启 OpenCode 后插件即开始从你的会话中学习。
+
+> **提示**：加 `-g` 参数可全局安装（所有项目生效），不加则只对当前项目生效：
+>
+> ```bash
+> opencode plugin -g github:realchendahuang/opencode-hermes-memory
+> ```
+
+### 手动安装（本地开发用）
 
 ```bash
 git clone https://github.com/realchendahuang/opencode-hermes-memory.git
@@ -38,9 +52,7 @@ mkdir -p ~/.config/opencode/plugins
 cp -R opencode-hermes-memory/hermes-memory.ts opencode-hermes-memory/hermes-memory-lib ~/.config/opencode/plugins/
 ```
 
-### 2. 注册插件
-
-在 `~/.config/opencode/opencode.json` 的 `plugin` 数组中加入：
+然后在 `~/.config/opencode/opencode.json` 的 `plugin` 数组中加入：
 
 ```json
 {
@@ -50,14 +62,14 @@ cp -R opencode-hermes-memory/hermes-memory.ts opencode-hermes-memory/hermes-memo
 }
 ```
 
-### 3. 安装依赖
+并安装依赖：
 
 ```bash
 cd ~/.config/opencode
 npm install @opencode-ai/plugin
 ```
 
-重启 OpenCode。插件会注册 5 个工具（`memory_search`、`memory_add`、`memory_replace`、`memory_remove`、`memory_history`），并自动开始从你的会话中学习。
+插件会注册 5 个工具（`memory_search`、`memory_add`、`memory_replace`、`memory_remove`、`memory_history`），并自动开始从你的会话中学习。
 
 ## 🧰 记忆工具
 

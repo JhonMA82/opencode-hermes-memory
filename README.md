@@ -30,7 +30,21 @@ Give your OpenCode agent a **real memory** — user preferences, project convent
 
 ## 🚀 Quick Start
 
-### 1. Install the plugin
+### Install from GitHub (recommended)
+
+```bash
+opencode plugin github:realchendahuang/opencode-hermes-memory
+```
+
+That's it — OpenCode downloads the plugin from GitHub, installs it, and registers it in your config automatically. Restart OpenCode and the plugin starts learning from your sessions.
+
+> **Note**: add `-g` to install globally (all projects) instead of the current project:
+>
+> ```bash
+> opencode plugin -g github:realchendahuang/opencode-hermes-memory
+> ```
+
+### Manual install (local development)
 
 ```bash
 git clone https://github.com/realchendahuang/opencode-hermes-memory.git
@@ -38,9 +52,7 @@ mkdir -p ~/.config/opencode/plugins
 cp -R opencode-hermes-memory/hermes-memory.ts opencode-hermes-memory/hermes-memory-lib ~/.config/opencode/plugins/
 ```
 
-### 2. Register it
-
-Add to the `plugin` array in `~/.config/opencode/opencode.json`:
+Then add to the `plugin` array in `~/.config/opencode/opencode.json`:
 
 ```json
 {
@@ -50,14 +62,14 @@ Add to the `plugin` array in `~/.config/opencode/opencode.json`:
 }
 ```
 
-### 3. Install the dependency
+And install the dependency:
 
 ```bash
 cd ~/.config/opencode
 npm install @opencode-ai/plugin
 ```
 
-Restart OpenCode. The plugin registers 5 tools (`memory_search`, `memory_add`, `memory_replace`, `memory_remove`, `memory_history`) and starts learning from your sessions automatically.
+The plugin registers 5 tools (`memory_search`, `memory_add`, `memory_replace`, `memory_remove`, `memory_history`) and starts learning from your sessions automatically.
 
 ## 🧰 Memory Tools
 
