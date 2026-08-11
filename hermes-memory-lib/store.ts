@@ -627,8 +627,9 @@ export class MemoryStore {
   }
 
   /** 双时态演化：把被取代的旧条目追加到 history.md（不占容量、不参与检索）。
-   *  历史文件上限 20000 字符，超出时丢弃最旧的历史（历史是辅助，活跃条目优先）。 */
-  private async appendHistory(target: Target, historyEntry: string): Promise<void> {
+   *  历史文件上限 20000 字符，超出时丢弃最旧的历史（历史是辅助，活跃条目优先）。
+   *  target 用 string：project 条目也走同一历史文件（"project" 不在 Target 联合内）。 */
+  private async appendHistory(target: string, historyEntry: string): Promise<void> {
     const file = historyFile();
     let existing = "";
     try {

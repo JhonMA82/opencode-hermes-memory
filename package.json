@@ -1,0 +1,36 @@
+{
+  "name": "opencode-hermes-memory",
+  "version": "0.1.0",
+  "description": "Layered persistent memory plugin for OpenCode — ported from Hermes agent",
+  "type": "module",
+  "main": "hermes-memory.ts",
+  "files": [
+    "hermes-memory.ts",
+    "hermes-memory-lib"
+  ],
+  "scripts": {
+    "test": "bun run hermes-memory-lib/tests/regression.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "keywords": [
+    "opencode",
+    "plugin",
+    "memory",
+    "hermes",
+    "persistent-memory",
+    "ai-agent",
+    "llm"
+  ],
+  "license": "MIT",
+  "engines": {
+    "bun": ">=1.0.0"
+  },
+  "peerDependencies": {
+    "@opencode-ai/plugin": "^1.18.0"
+  },
+  "devDependencies": {
+    "@opencode-ai/plugin": "^1.18.12",
+    "@types/bun": "^1.1.0",
+    "typescript": "^5.5.0"
+  }
+}

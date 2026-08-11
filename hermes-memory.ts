@@ -514,8 +514,9 @@ const plugin: Plugin = async ({ client, project, directory }) => {
           }
           try {
             const entries = raw ? splitEntries(raw) : [];
-            const filtered = args.query
-              ? entries.filter((e) => e.includes(args.query))
+            const query = args.query ?? "";
+            const filtered = query
+              ? entries.filter((e) => e.includes(query))
               : entries;
             const limit = Math.max(1, Math.min(Math.floor(args.limit ?? 20), 50));
             const picked = filtered.slice(-limit);

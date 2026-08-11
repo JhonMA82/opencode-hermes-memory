@@ -52,8 +52,8 @@ export async function completeWithInternalSession(
     });
     const parts = resp.data?.parts ?? [];
     const text = parts
-      .filter((p): p is { type: "text"; text: string } => p.type === "text" && typeof (p as any).text === "string")
-      .map((p) => (p as any).text)
+      .filter((p) => p.type === "text" && typeof (p as { text?: unknown }).text === "string")
+      .map((p) => (p as { text: string }).text)
       .join("\n");
     return { text: text.trim() };
   } catch (err) {

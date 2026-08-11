@@ -229,8 +229,13 @@ async function writeConsolidateState(state: ConsolidateState): Promise<void> {
   }
 }
 
-function targetKey(target: Target, projectId?: string): string {
+function targetKey(target: Target | "project", projectId?: string): string {
   return projectId ? `project:${projectId}` : target;
+}
+
+/** 类型守卫：target === "project" 时收窄为 project 分支（配合 projectId 使用） */
+function isProjectTarget(target: Target | "project"): target is "project" {
+  return target === "project";
 }
 
 export async function consolidateTarget(
@@ -259,7 +264,7 @@ export async function consolidateTarget(
 
   const rawEntries = projectId
     ? store.getRawProjectEntries(projectId)
-    : store.getRawEntriesFor(target);
+    : store.getRawEntriesFor(target as Target);
   if (rawEntries.length < 2) {
     return { consolidated: false, error: "Too few entries to consolidate." };
   }
@@ -295,7 +300,7 @@ export async function consolidateTarget(
 
   const result = projectId
     ? await applyProjectConsolidation(store, projectId, scoped)
-    : await store.applyMutationPlan(target, scoped, { requireShrink: true });
+    : await store.applyMutationPlan(target as Target, scoped, { requireShrink: true });
   if (!result.success) return { consolidated: false, error: result.error };
 
   // project 分支没有 applyMutationPlan 的 requireShrink，这里手动验证：
@@ -354,8 +359,10 @@ export function clearSessionState(): void {
 }
 
 // ─── Transcript builder ───
+// info.summary 用 unknown：OpenCode SDK 的 Message.summary 是对象（{title, body, diffs}），
+// 而旧版是 boolean；truthy 判断对两者都成立，行为一致。
 type MessageLike = {
-  info: { role?: string; summary?: boolean; modelID?: string };
+  info: { role?: string; summary?: unknown; modelID?: string };
   parts: Array<{ type: string; text?: string; synthetic?: boolean }>;
 };
 
