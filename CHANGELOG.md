@@ -2,13 +2,9 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 与 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
-## [Unreleased]
+## [0.2.0] - 2026-08-11
 
 ### Added
-- 项目开源：README（中英双语）、CONTRIBUTING、SECURITY、CODE_OF_CONDUCT
-- 项目元数据：package.json、tsconfig.json
-- CI：GitHub Actions 测试 workflow
-- Issue / PR 模板
 - **GitHub 直装支持**：`opencode plugin github:realchendahuang/opencode-hermes-memory` 一键安装（无需 npm），README 已更新为官方安装方式
 
 ### Changed
@@ -18,7 +14,15 @@
 
 ### Fixed
 - 类型检查全绿：修复 `@opencode-ai/plugin` SDK 类型差异（`Message.summary` 对象化、`Part` 结构变化）与 `Target | "project"` 联合类型收窄问题
-- `tests/regression.ts` 绝对路径改为相对路径（`import.meta.url` 无关，直接相对引用）
+- `tests/regression.ts` 绝对路径改为相对路径
+
+## [Unreleased]
+
+### Added
+- 项目开源：README（中英双语）、CONTRIBUTING、SECURITY、CODE_OF_CONDUCT
+- 项目元数据：package.json、tsconfig.json
+- CI：GitHub Actions 测试 workflow
+- Issue / PR 模板
 
 ## [0.1.0] - 2026-08-11
 
