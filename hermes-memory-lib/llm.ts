@@ -1,19 +1,16 @@
 /**
- * Hermes Memory for OpenCode — internal-session LLM channel.
+ * Hermes Memory — LLM channel.
  *
- * OpenCode plugins have no direct "text completion" API, so we drive the LLM
- * through a throwaway internal session (like opencode-mem does). Every call
- * creates a session, sends one prompt, collects the assistant text, then
- * deletes the session. Sessions are title-tagged so background-learning logic
- * can skip them (avoids an unbounded idle → LLM → idle loop).
+ * V2 (native): uses `ctx.generate.text()` — no sessions, no tools, no history.
+ * No internal sessions, no idle loops, no cleanup needed.
+ *
+ * V1 (legacy, kept for backwards compat): drives the LLM through a throwaway
+ * internal session, title-tagged so background learning can skip it.
  */
-import type { PluginInput } from "@opencode-ai/plugin";
 
 export const INTERNAL_SESSION_TITLE = "[hm-internal]";
 
-/** 本进程创建的内部会话 ID（创建时登记、删除时移除）。
- *  chat.message 等钩子用它同步跳过内部会话，避免审查 prompt 触发
- *  纠正检测/记忆自动注入/轮次计数（标题检查需要异步 session.get，太贵）。 */
+/** IDs of internal sessions created by this process (V1 path only). */
 const internalSessionIDs = new Set<string>();
 
 export function isInternalSessionId(sessionID: string | undefined | null): boolean {
@@ -29,12 +26,47 @@ export type InternalCompletion = {
   error?: string;
 };
 
+type GenerateFn = (input: {
+  prompt: string;
+  model?: { providerID: string; id: string };
+}) => Promise<{ text: string }>;
+
 /**
- * Run one LLM completion via a fresh internal session.
- * model may be { providerID, modelID }; omit to inherit the default.
+ * V2 completion via ctx.generate.text().
+ * `generate` is `ctx.generate.text` bound (or any compatible function).
+ */
+export async function completeWithGenerate(
+  generate: GenerateFn,
+  systemPrompt: string,
+  userPrompt: string,
+  model?: { providerID: string; id: string },
+): Promise<InternalCompletion> {
+  try {
+    const combined = `${systemPrompt}\n\n${userPrompt}`;
+    const result = await generate({ prompt: combined, model });
+    const text = typeof result?.text === "string" ? result.text.trim() : "";
+    if (!text) return { text: "", error: "empty model output" };
+    return { text };
+  } catch (err) {
+    return { text: "", error: String(err) };
+  }
+}
+
+/** Minimal V1 client shape (only what the legacy path touches). */
+type V1ClientLike = {
+  session: {
+    create: (input: unknown) => Promise<{ data?: { id?: string } }>;
+    prompt: (input: unknown) => Promise<{ data?: { parts?: Array<{ type?: string; text?: unknown }> } }>;
+    delete: (input: unknown) => Promise<unknown>;
+  };
+};
+
+/**
+ * V1 completion via a fresh internal session (legacy).
+ * Kept so the `server()` export keeps working on OpenCode 1.x.
  */
 export async function completeWithInternalSession(
-  client: PluginInput["client"],
+  client: V1ClientLike,
   directory: string,
   systemPrompt: string,
   userPrompt: string,
@@ -45,7 +77,7 @@ export async function completeWithInternalSession(
     const created = await client.session.create({
       query: { directory },
       body: { title: INTERNAL_SESSION_TITLE },
-    });
+    } as unknown);
     sessionID = created.data?.id;
     if (!sessionID) return { text: "", error: "Failed to create internal session" };
     internalSessionIDs.add(sessionID);
@@ -59,7 +91,7 @@ export async function completeWithInternalSession(
           { type: "text", text: userPrompt },
         ],
       },
-    });
+    } as unknown);
     const parts = resp.data?.parts ?? [];
     const text = parts
       .filter((p) => p.type === "text" && typeof (p as { text?: unknown }).text === "string")
@@ -72,9 +104,8 @@ export async function completeWithInternalSession(
     if (sessionID) {
       internalSessionIDs.delete(sessionID);
       try {
-        await client.session.delete({ path: { id: sessionID } });
+        await client.session.delete({ path: { id: sessionID } } as unknown);
       } catch (err) {
-        // 删除失败不能静默——记录日志便于发现内部会话堆积
         console.error(`[hermes-memory] internal session delete failed: ${sessionID}`, err);
       }
     }

@@ -1,21 +1,24 @@
 {
   "name": "opencode-hermes-memory",
-  "version": "0.3.1",
-  "description": "Layered persistent memory plugin for OpenCode — ported from Hermes agent",
+  "version": "0.4.0",
+  "description": "Layered persistent memory plugin for OpenCode V2 — ported from Hermes agent",
   "type": "module",
   "main": "hermes-memory.ts",
   "exports": {
-    "./server": "./hermes-memory.ts"
+    ".": "./index.ts"
   },
   "files": [
+    "index.ts",
     "hermes-memory.ts",
     "hermes-memory-lib"
   ],
   "scripts": {
-    "test": "bun run hermes-memory-lib/tests/regression.ts",
+    "test": "bun run hermes-memory-lib/tests/regression.ts && bun run hermes-memory-lib/tests/v2-smoke.ts",
+    "test:regression": "bun run hermes-memory-lib/tests/regression.ts",
+    "test:v2": "bun run hermes-memory-lib/tests/v2-smoke.ts",
     "typecheck": "tsc --noEmit",
-    "lint": "biome check hermes-memory.ts hermes-memory-lib/",
-    "lint:fix": "biome check --write hermes-memory.ts hermes-memory-lib/"
+    "lint": "biome check index.ts hermes-memory.ts hermes-memory-lib/",
+    "lint:fix": "biome check --write index.ts hermes-memory.ts hermes-memory-lib/"
   },
   "keywords": [
     "opencode",
@@ -41,15 +44,18 @@
   "homepage": "https://github.com/realchendahuang/opencode-hermes-memory#readme",
   "engines": {
     "bun": ">=1.0.0",
-    "opencode": ">=1.18.0"
+    "opencode": ">=2.0.0"
+  },
+  "dependencies": {
+    "@opencode/plugin": "2.0.11"
   },
   "peerDependencies": {
-    "@opencode-ai/plugin": "^1.18.0"
+    "@opencode/plugin": "2.0.11"
   },
   "devDependencies": {
-    "@biomejs/biome": "^2.5.8",
-    "@opencode-ai/plugin": "^1.18.12",
-    "@types/bun": "^1.1.0",
-    "typescript": "^5.5.0"
+    "@biomejs/biome": "2.5.8",
+    "@opencode/plugin": "2.0.11",
+    "@types/bun": "1.4.0",
+    "typescript": "5.8.2"
   }
 }

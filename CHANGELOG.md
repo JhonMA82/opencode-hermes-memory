@@ -4,6 +4,20 @@
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-09-20
+
+### Changed (BREAKING: requires OpenCode >= 2.0)
+- Native V2 plugin: `Plugin.define({ id: "hermes-memory", setup })` from `@opencode/plugin@2.0.11`
+- Tools via `ctx.tool.transform` (JSON Schema, `{ content }` results); hooks via `ctx.session.hook("prompt"|"context"|"compaction")`, `ctx.tool.hook("execute.after")`, `ctx.event.subscribe()`
+- LLM via `ctx.generate.text()` — no internal sessions, no idle→LLM→idle loop, no session cleanup
+- Injection via `ctx.session.synthetic()` instead of `noReply` prompts
+- V2 event shapes: `session.idle` / `session.deleted` carry `data.sessionID`
+- Transcript builder handles both V1 (`{info, parts}`) and V2 (`SessionMessageInfo`) message shapes
+- `consolidateTargetV2` / `runBackgroundReviewV2` / `runFlushReviewV2` with injected `LearnDeps`
+- New `hermesNudgeInterval` plugin option (env `HERMES_NUDGE_INTERVAL` still works as fallback)
+- V1 `server()` export removed — OpenCode 1.x users stay on v0.3.x
+- Added `hermes-memory-lib/tests/v2-smoke.ts` (mock ctx: tools, hooks, correction, injection, compaction, prefetch)
+
 ## [0.3.1] - 2026-08-12
 
 ### Fixed

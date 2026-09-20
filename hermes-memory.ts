@@ -1,36 +1,40 @@
 /**
- * Hermes Memory for OpenCode — plugin entry.
+ * Hermes Memory for OpenCode V2 — plugin entry.
  *
- * A faithful port of the pi-hermes-memory layered-memory mechanism
- * (itself ported from Hermes agent) onto the OpenCode plugin API.
+ * Native V2 implementation (OpenCode >= 2.0):
+ *   - `Plugin.define({ id, setup })` from `@opencode/plugin`
+ *   - Tools via `ctx.tool.transform`
+ *   - Prompt admission via `ctx.session.hook("prompt")` (correction detection,
+ *     turn counting, relevant-memory auto-injection)
+ *   - System injection via `ctx.session.hook("context")` (policy + STANDING +
+ *     project memory)
+ *   - Flush review via `ctx.session.hook("compaction")`
+ *   - Error prefetch via `ctx.tool.hook("execute.after")` (bash failures)
+ *   - Background learning via `ctx.event.subscribe()` (session.idle)
+ *   - LLM via `ctx.generate.text()` (no internal sessions)
  *
  * Layers:
- *   L0 STANDING.md   — hard instructions, injected every session
+ *   L0 STANDING.md   — hard instructions, injected every model request
  *   L1 Markdown truth — USER.md / MEMORY.md / failures.md / projects-memory/<id>/MEMORY.md
  *   L2 retrieval     — memory_search tool over the Markdown layers
- *   Learning loop    — session.idle background review (LLM, debounced),
- *                      correction detection on chat.message (rule-based),
- *                      flush review before compaction,
+ *   Learning loop    — background review on idle (generate.text, debounced),
+ *                      correction detection on prompt (rule-based),
+ *                      flush review on compaction,
  *                      auto-consolidation when a target hits capacity
- *
- * Injection: policy-only by default via experimental.chat.system.transform,
- * with a noReply fallback for STANDING.md if that hook never fires.
  */
 import * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
 import * as path from "node:path";
-import type { Plugin } from "@opencode-ai/plugin";
-import { tool } from "@opencode-ai/plugin";
+import { Plugin } from "@opencode/plugin";
 import {
   clearSession,
   clearSessionState,
-  consolidateTarget,
+  consolidateTargetV2,
   detectCorrection,
-  runBackgroundReview,
-  runFlushReview,
+  runBackgroundReviewV2,
+  runFlushReviewV2,
   setDebugLogger,
 } from "./hermes-memory-lib/learn.ts";
-import { isInternalSession, isInternalSessionId } from "./hermes-memory-lib/llm.ts";
 import { historyFile } from "./hermes-memory-lib/paths.ts";
 import {
   DEFAULT_NUDGE_INTERVAL,
@@ -42,13 +46,17 @@ import { searchMemories } from "./hermes-memory-lib/search.ts";
 import { type MemoryCategory, MemoryStore, splitEntries, type Target } from "./hermes-memory-lib/store.ts";
 
 const LOG_FILE = path.join(process.env.HOME ?? ".", ".local", "share", "opencode", "log", "hermes-memory.log");
-const LOG_MAX_BYTES = 1 * 1024 * 1024; // 日志轮转阈值：1MB
-const LOG_ROTATE_CHECK_INTERVAL_MS = 30_000; // 轮转检查缓存：30s 内不重复 stat
-const NUDGE_INTERVAL = Number(process.env.HERMES_NUDGE_INTERVAL) || DEFAULT_NUDGE_INTERVAL; // turns between background reviews
+const LOG_MAX_BYTES = 1 * 1024 * 1024;
+const LOG_ROTATE_CHECK_INTERVAL_MS = 30_000;
+
+function nudgeIntervalFromEnvAndOptions(options: Record<string, unknown>): number {
+  const fromOptions = Number((options as { hermesNudgeInterval?: unknown }).hermesNudgeInterval);
+  if (Number.isFinite(fromOptions) && fromOptions > 0) return Math.floor(fromOptions);
+  return Number(process.env.HERMES_NUDGE_INTERVAL) || DEFAULT_NUDGE_INTERVAL;
+}
+
 const IDLE_DEBOUNCE_MS = 10_000;
 
-/** 日志轮转：超过阈值时把 .2→.1→.log 逐级后移（保留最近 2 份旧日志），
- *  避免无限膨胀。30s 缓存：system.transform 高频调用下不每次 stat 文件系统。 */
 let lastRotateCheckAt = 0;
 function rotateLog(): void {
   const now = Date.now();
@@ -59,10 +67,9 @@ function rotateLog(): void {
     try {
       stat = fs.statSync(LOG_FILE);
     } catch {
-      return; // 日志文件不存在
+      return;
     }
     if (!stat.isFile() || stat.size < LOG_MAX_BYTES) return;
-    // .2 删除，.1 → .2，.log → .1
     fs.rmSync(`${LOG_FILE}.2`, { force: true });
     if (fs.existsSync(`${LOG_FILE}.1`)) fs.renameSync(`${LOG_FILE}.1`, `${LOG_FILE}.2`);
     fs.renameSync(LOG_FILE, `${LOG_FILE}.1`);
@@ -85,16 +92,7 @@ function projectIdOf(project: { id?: string } | undefined, directory: string): s
   return path.basename(directory) || "default";
 }
 
-type TextPartLike = { type?: string; text?: unknown; synthetic?: boolean };
-
-function textParts(parts: TextPartLike[] | undefined): string {
-  return (parts ?? [])
-    .filter((p) => p?.type === "text" && typeof p.text === "string" && !p.synthetic)
-    .map((p) => p.text as string)
-    .join("\n");
-}
-
-// ─── Bash 错误检测（错误记忆预取用）───
+// ─── Bash error detection (for failure-memory prefetch) ───
 const BASH_ERROR_PATTERNS: RegExp[] = [
   /command not found/i,
   /no such file or directory/i,
@@ -137,127 +135,368 @@ function extractErrorSnippet(text: string): string {
     .split("\n")
     .map((l) => l.trim())
     .filter(Boolean);
-  // 优先取含错误关键词的行，最多 3 行
   const errLines = lines.filter((l) => BASH_ERROR_PATTERNS.some((re) => re.test(l)));
   const picked = (errLines.length ? errLines : lines).slice(0, 3);
   return picked.join(" ").slice(0, 200);
 }
 
+/** Extract readable text from a V2 tool-after event (handles several shapes). */
+function extractToolResultText(event: {
+  status?: string;
+  result?: unknown;
+  error?: unknown;
+  output?: unknown;
+}): string {
+  if (event.status === "error") {
+    const err = event.error as { message?: unknown; data?: unknown } | undefined;
+    if (typeof err?.message === "string") return err.message;
+    return JSON.stringify(err ?? "");
+  }
+  const result = event.result as
+    | { content?: string | Array<{ type?: string; text?: string }>; output?: unknown; text?: unknown }
+    | string
+    | undefined;
+  if (typeof result === "string") return result;
+  if (typeof result?.content === "string") return result.content;
+  if (Array.isArray(result?.content)) {
+    return result.content
+      .filter((c) => c?.type === "text" && typeof c.text === "string")
+      .map((c) => (c as { text: string }).text)
+      .join("\n");
+  }
+  if (typeof result?.output === "string") return result.output;
+  if (typeof result?.text === "string") return result.text;
+  if (typeof event.output === "string") return event.output;
+  return "";
+}
+
 const TARGETS = ["memory", "user", "failure", "project"] as const;
 const CATEGORIES = ["failure", "correction", "insight", "preference", "convention", "tool-quirk"] as const;
 
-const plugin: Plugin = async ({ client, project, directory }) => {
-  // 日志目录不一定存在（首次安装）——先建目录，否则 log() 会一直静默失败
-  try {
-    fs.mkdirSync(path.dirname(LOG_FILE), { recursive: true });
-  } catch {
-    /* ignore */
-  }
-  const store = new MemoryStore({});
-  await store.loadFromDisk().catch((err) => log(`store load failed: ${String(err)}`));
+type ToolInput = Record<string, unknown>;
 
-  store.setConsolidator((target, _signal, projectId) => consolidateTarget(client, store, target, directory, projectId));
-  setDebugLogger((msg) => log(msg));
+export default Plugin.define({
+  id: "hermes-memory",
+  async setup(ctx) {
+    try {
+      fs.mkdirSync(path.dirname(LOG_FILE), { recursive: true });
+    } catch {
+      /* ignore */
+    }
 
-  const currentProject = projectIdOf(project, directory);
-  const sessionTurns = new Map<string, number>();
-  let idleTimer: ReturnType<typeof setTimeout> | null = null;
-  let lastIdleSession: string | null = null;
-  let systemTransformFired = false;
-  // 全局审查频率控制：距上次审查 <30 分钟不触发（跨会话生效，防频繁切换会话烧 token）
-  let lastReviewAt = 0;
-  const REVIEW_MIN_INTERVAL_MS = 30 * 60 * 1000;
-  // 错误预取频率控制：同一会话 60s 内最多注入一次（连续失败不重复注入）
-  const lastPrefetchAt = new Map<string, number>();
-  const PREFETCH_MIN_INTERVAL_MS = 60 * 1000;
-  // 会话级已注入记忆缓存（去重：同一记忆不重复注入）
-  const injectedThisSession = new Map<string, Set<string>>();
-  // 每轮最多注入条数（控制上下文膨胀）
-  const MAX_INJECT_PER_TURN = 2;
-  // 注入阈值：score ≥ 0.4 才注入（实测：短查询天然低分，1.0 会漏掉真实相关记忆；
-  // 0.4 下无关查询实测全无命中，无噪声风险）
-  const INJECT_SCORE_THRESHOLD = 0.4;
+    const directory = ctx.location.directory;
+    const currentProject = projectIdOf(
+      ctx.location.project as { id?: string } | undefined,
+      directory,
+    );
+    const NUDGE_INTERVAL = nudgeIntervalFromEnvAndOptions(ctx.options as Record<string, unknown>);
 
-  log(`initialized (project=${currentProject}, dir=${directory})`);
+    const store = new MemoryStore({});
+    await store.loadFromDisk().catch((err) => log(`store load failed: ${String(err)}`));
 
-  return {
-    // ─── L0 + policy injection into system prompt ───
-    "experimental.chat.system.transform": async (_input, output) => {
+    store.setConsolidator((target, _signal, projectId) =>
+      consolidateTargetV2(ctx.generate, store, target, projectId),
+    );
+    setDebugLogger((msg) => log(msg));
+
+    const sessionTurns = new Map<string, number>();
+    let idleTimer: ReturnType<typeof setTimeout> | null = null;
+    let lastIdleSession: string | null = null;
+    let lastReviewAt = 0;
+    const REVIEW_MIN_INTERVAL_MS = 30 * 60 * 1000;
+    const lastPrefetchAt = new Map<string, number>();
+    const PREFETCH_MIN_INTERVAL_MS = 60 * 1000;
+    const injectedThisSession = new Map<string, Set<string>>();
+    const MAX_INJECT_PER_TURN = 2;
+    const INJECT_SCORE_THRESHOLD = 0.4;
+
+    const controller = new AbortController();
+
+    log(`initialized v2 (project=${currentProject}, dir=${directory})`);
+
+    // ─── Tools ───
+    await ctx.tool.transform((editor) => {
+      editor.add({
+        name: "memory_search",
+        description: MEMORY_SEARCH_TOOL_DESCRIPTION,
+        input: {
+          type: "object",
+          properties: {
+            query: { type: "string", description: "Search terms (concrete words work best)." },
+            target: { type: "string", enum: [...TARGETS], description: "Which memory layer to search. Omit to search all." },
+            category: {
+              type: "string",
+              enum: [...CATEGORIES],
+              description: "Only for target=failure: lesson category.",
+            },
+            project: { type: "string", description: "Project scope for project memories (defaults to current project)." },
+            limit: { type: "number", description: "Max results (default 10)." },
+          },
+          required: ["query"],
+          additionalProperties: false,
+        },
+        async execute(input) {
+          const args = input as {
+            query: string;
+            target?: Target | "project";
+            category?: MemoryCategory;
+            project?: string;
+            limit?: number;
+          };
+          const project = args.target === "project" || !args.target ? args.project || currentProject : undefined;
+          const hits = searchMemories(store, {
+            query: args.query,
+            target: args.target,
+            category: args.category,
+            project,
+            limit: Math.max(1, Math.min(Math.floor(args.limit ?? 10), 50)),
+          });
+          return {
+            content: JSON.stringify({
+              success: true,
+              query: args.query,
+              count: hits.length,
+              results: hits.map((h) => ({
+                target: h.target,
+                project: h.project ?? null,
+                score: Math.round(h.score * 100),
+                content: h.content,
+              })),
+            }),
+          };
+        },
+      });
+
+      editor.add({
+        name: "memory_add",
+        description: MEMORY_ADD_TOOL_DESCRIPTION,
+        input: {
+          type: "object",
+          properties: {
+            content: { type: "string", description: "The durable fact to remember." },
+            target: {
+              type: "string",
+              enum: [...TARGETS],
+              description: "user=profile, memory=global notes, project=repo-specific, failure=categorized lesson.",
+            },
+            category: { type: "string", enum: [...CATEGORIES], description: "Required for target=failure." },
+            failure_reason: { type: "string", description: "Optional context for failure entries." },
+            project: {
+              type: "string",
+              description:
+                "Project name when target=project (defaults to current project); also used to scope failure entries.",
+            },
+          },
+          required: ["content", "target"],
+          additionalProperties: false,
+        },
+        async execute(input) {
+          const args = input as {
+            content: string;
+            target: Target | "project";
+            category?: MemoryCategory;
+            failure_reason?: string;
+            project?: string;
+          };
+          if (args.target === "project") {
+            const project = args.project || currentProject;
+            const r = await store.addToProject(project, args.content);
+            log(`memory_add project=${project} success=${r.success} err=${r.error ?? ""}`);
+            return {
+              content: JSON.stringify({
+                success: r.success,
+                message: r.message,
+                error: r.error,
+                usage: r.usage,
+                entry_count: r.entry_count,
+              }),
+            };
+          }
+          const target = args.target as Target;
+          if (target === "failure" && !args.category) {
+            return {
+              content: JSON.stringify({ success: false, error: "category is required for target=failure." }),
+            };
+          }
+          const r =
+            target === "failure" && args.category
+              ? await store.addFailure(args.content, {
+                  category: args.category,
+                  failureReason: args.failure_reason,
+                  project: args.project || currentProject,
+                })
+              : await store.add(target, args.content);
+          log(`memory_add target=${target} success=${r.success} err=${r.error ?? ""}`);
+          return {
+            content: JSON.stringify({
+              success: r.success,
+              message: r.message,
+              error: r.error,
+              usage: r.usage,
+              entry_count: r.entry_count,
+            }),
+          };
+        },
+      });
+
+      editor.add({
+        name: "memory_replace",
+        description:
+          "Replace an existing memory entry. old_text is matched exactly first (the full entry text or its [category] prefix), falling back to substring if no exact match. The old version is kept in evolution history (readable via memory_history).",
+        input: {
+          type: "object",
+          properties: {
+            target: { type: "string", enum: [...TARGETS], description: "Which layer the entry lives in." },
+            old_text: { type: "string", description: "Entry text to match (exact match preferred, substring fallback)." },
+            content: { type: "string", description: "New entry text." },
+            project: { type: "string", description: "Project name when target=project." },
+          },
+          required: ["target", "old_text", "content"],
+          additionalProperties: false,
+        },
+        async execute(input) {
+          const args = input as { target: Target | "project"; old_text: string; content: string; project?: string };
+          if (args.target === "project") {
+            const r = await store.replaceProjectEntry(args.project || currentProject, args.old_text, args.content);
+            return {
+              content: JSON.stringify({ success: r.success, message: r.message, error: r.error, matches: r.matches ?? null }),
+            };
+          }
+          const r = await store.replace(args.target as Target, args.old_text, args.content);
+          return {
+            content: JSON.stringify({ success: r.success, message: r.message, error: r.error, matches: r.matches ?? null }),
+          };
+        },
+      });
+
+      editor.add({
+        name: "memory_remove",
+        description:
+          "Remove a memory entry. old_text is matched exactly first (the full entry text or its [category] prefix), falling back to substring if no exact match.",
+        input: {
+          type: "object",
+          properties: {
+            target: { type: "string", enum: [...TARGETS], description: "Which layer the entry lives in." },
+            old_text: { type: "string", description: "Entry text to match (exact match preferred, substring fallback)." },
+            project: { type: "string", description: "Project name when target=project." },
+          },
+          required: ["target", "old_text"],
+          additionalProperties: false,
+        },
+        async execute(input) {
+          const args = input as { target: Target | "project"; old_text: string; project?: string };
+          if (args.target === "project") {
+            const r = await store.removeProjectEntry(args.project || currentProject, args.old_text);
+            return {
+              content: JSON.stringify({ success: r.success, message: r.message, error: r.error, matches: r.matches ?? null }),
+            };
+          }
+          const r = await store.remove(args.target as Target, args.old_text);
+          return {
+            content: JSON.stringify({ success: r.success, message: r.message, error: r.error, matches: r.matches ?? null }),
+          };
+        },
+      });
+
+      editor.add({
+        name: "memory_history",
+        description:
+          "Read the evolution history of replaced memory entries (superseded versions kept by memory_replace). Use when you need to trace how a fact was configured before, or what an entry looked like before it was replaced. Read-only.",
+        input: {
+          type: "object",
+          properties: {
+            query: { type: "string", description: "Optional substring to filter history entries by." },
+            limit: { type: "number", description: "Max entries to return (default 20)." },
+          },
+          additionalProperties: false,
+        },
+        async execute(input) {
+          const args = input as { query?: string; limit?: number };
+          let raw: string;
+          try {
+            raw = await fsp.readFile(historyFile(), "utf-8");
+          } catch (err) {
+            if ((err as NodeJS.ErrnoException).code === "ENOENT") raw = "";
+            else return { content: JSON.stringify({ success: false, error: String(err) }) };
+          }
+          try {
+            const entries = raw ? splitEntries(raw) : [];
+            const query = args.query ?? "";
+            const filtered = query ? entries.filter((e) => e.includes(query)) : entries;
+            const limit = Math.max(1, Math.min(Math.floor(args.limit ?? 20), 50));
+            const picked = filtered.slice(-limit);
+            return {
+              content: JSON.stringify({
+                success: true,
+                count: picked.length,
+                total: entries.length,
+                entries: picked.map((e) => {
+                  const meta = store.getEntryMeta(e);
+                  return {
+                    content: meta.text,
+                    created: meta.created,
+                    lastReferenced: meta.lastReferenced,
+                    superseded: meta.superseded,
+                    supersedes: meta.supersedes,
+                  };
+                }),
+              }),
+            };
+          } catch (err) {
+            return { content: JSON.stringify({ success: false, error: String(err) }) };
+          }
+        },
+      });
+    });
+
+    // ─── L0 + policy injection into every model request ───
+    await ctx.session.hook("context", (event) => {
       try {
-        systemTransformFired = true;
-        const blocks: string[] = [MEMORY_POLICY_PROMPT];
+        event.system.push({ type: "text", text: MEMORY_POLICY_PROMPT });
         const standing = store.formatStandingForPrompt();
-        if (standing) blocks.push(standing);
+        if (standing) event.system.push({ type: "text", text: standing });
         const projectBlock = store.formatProjectBlock(currentProject);
-        if (projectBlock) blocks.push(projectBlock);
-        output.system.push(...blocks);
-        log(`system.transform injected ${blocks.length} block(s)`);
+        if (projectBlock) event.system.push({ type: "text", text: projectBlock });
       } catch (err) {
-        log(`system.transform error: ${String(err)}`);
+        log(`context hook error: ${String(err)}`);
       }
-    },
+    });
 
-    // ─── Correction detection + turn counting ───
-    "chat.message": async (input, output) => {
+    // ─── Correction detection + turn counting + auto-injection ───
+    await ctx.session.hook("prompt", async (event) => {
       try {
-        // 跳过我们自己的内部审查会话（审查 prompt 不该触发纠正检测/记忆注入/轮次计数）
-        if (isInternalSessionId(input.sessionID)) return;
-        const userText = textParts(output.parts).trim();
+        const userText = (event.prompt.text ?? "").trim();
         if (!userText) return;
 
-        // Turn counter for nudge-based background learning.
-        const turns = (sessionTurns.get(input.sessionID) ?? 0) + 1;
-        sessionTurns.set(input.sessionID, turns);
+        const turns = (sessionTurns.get(event.sessionID) ?? 0) + 1;
+        sessionTurns.set(event.sessionID, turns);
 
-        // Rule-based correction detection → immediate failure memory.
         const match = detectCorrection(userText);
         if (match.matched) {
-          // 检测基于首行，保存也应只存首行（避免混入后续任务内容）
           const snippet = userText.split("\n")[0].trim().slice(0, 300);
-          await store.addFailure(snippet, {
-            category: "correction",
-            project: currentProject,
-          });
+          await store.addFailure(snippet, { category: "correction", project: currentProject });
           log(`correction saved (${match.reason}): ${snippet.slice(0, 80)}`);
         }
 
-        // ─── 相关记忆自动注入（记忆不靠模型自觉调用）───
-        // 用户消息到达时检索 top-N 相关记忆（memory+user+failure；project 记忆已
-        // 全量注入 system prompt，这里不重复），命中阈值以上注入为 synthetic part。
-        // 会话级去重 + 每轮上限，控制上下文膨胀。
         try {
-          const hits = searchMemories(store, {
-            query: userText,
-            limit: 8,
-          });
+          const hits = searchMemories(store, { query: userText, limit: 8 });
           const fresh = hits.filter((h) => h.score >= INJECT_SCORE_THRESHOLD);
           if (fresh.length > 0) {
-            const injected = injectedThisSession.get(input.sessionID) ?? new Set<string>();
-            const toInject = fresh.filter((h) => !injected.has(h.content.slice(0, 60))).slice(0, MAX_INJECT_PER_TURN);
+            const injected = injectedThisSession.get(event.sessionID) ?? new Set<string>();
+            const toInject = fresh
+              .filter((h) => !injected.has(h.content.slice(0, 60)))
+              .slice(0, MAX_INJECT_PER_TURN);
             if (toInject.length > 0) {
               const block = store.fenceBlock(
                 toInject
                   .map((h) => `• [${h.target}${h.project ? `:${h.project}` : ""}] ${h.content.slice(0, 400)}`)
                   .join("\n"),
               );
-              await client.session
-                .prompt({
-                  path: { id: input.sessionID },
-                  body: {
-                    parts: [
-                      {
-                        id: `prt-memauto-${Date.now()}`,
-                        type: "text",
-                        text: block,
-                        synthetic: true,
-                      },
-                    ],
-                    noReply: true,
-                  },
-                })
-                .catch((err) => log(`memory auto-inject failed: ${String(err)}`));
+              await ctx.session
+                .synthetic({ sessionID: event.sessionID, text: block })
+                .catch((err: unknown) => log(`memory auto-inject failed: ${String(err)}`));
               for (const h of toInject) injected.add(h.content.slice(0, 60));
-              injectedThisSession.set(input.sessionID, injected);
+              injectedThisSession.set(event.sessionID, injected);
               log(
                 `memory auto-inject: ${toInject.length} hit(s) (scores=${toInject.map((h) => h.score.toFixed(1)).join(",")})`,
               );
@@ -266,150 +505,39 @@ const plugin: Plugin = async ({ client, project, directory }) => {
         } catch (err) {
           log(`memory auto-inject error: ${String(err)}`);
         }
-
-        // Fallback for STANDING.md + project block if system.transform never fired.
-        if (!systemTransformFired) {
-          const blocks: string[] = [];
-          const standing = store.formatStandingForPrompt();
-          if (standing) blocks.push(`<standing-instructions>\n${standing}\n</standing-instructions>`);
-          const projectBlock = store.formatProjectBlock(currentProject);
-          if (projectBlock) blocks.push(projectBlock);
-          if (blocks.length > 0) {
-            await client.session
-              .prompt({
-                path: { id: input.sessionID },
-                body: {
-                  parts: [
-                    {
-                      id: `prt-standing-${Date.now()}`,
-                      type: "text",
-                      text: blocks.join("\n\n"),
-                      synthetic: true,
-                    },
-                  ],
-                  noReply: true,
-                },
-              })
-              .catch((err) => log(`standing fallback inject failed: ${String(err)}`));
-            systemTransformFired = true;
-          }
-        }
       } catch (err) {
-        log(`chat.message error: ${String(err)}`);
+        log(`prompt hook error: ${String(err)}`);
       }
-    },
+    });
 
-    // ─── Background learning on idle ───
-    event: async (input) => {
-      const event = input.event;
+    // ─── Flush review on compaction ───
+    await ctx.session.hook("compaction", async (event) => {
       try {
-        // 会话删除：清理会话级状态（sessionTurns/injectedThisSession/lastPrefetchAt/
-        // reviewedUpTo），防 Map 随会话数无限增长
-        if (event.type === "session.deleted") {
-          const info = (event.properties as { info?: { id?: string } } | undefined)?.info;
-          if (info?.id) {
-            sessionTurns.delete(info.id);
-            injectedThisSession.delete(info.id);
-            lastPrefetchAt.delete(info.id);
-            clearSession(info.id);
-            if (lastIdleSession === info.id) lastIdleSession = null;
-          }
-          return;
-        }
-        if (event.type !== "session.idle") return;
-
-        const sessionID = (event.properties as { sessionID?: string } | undefined)?.sessionID;
-        if (!sessionID) return;
-        if (sessionID === lastIdleSession) return;
-
-        // Skip our own internal sessions (avoids idle → LLM → idle loop).
-        // ID 集合是同步快路径；标题检查兜底（内部会话可能是别的进程创建的）。
-        if (isInternalSessionId(sessionID)) return;
-        try {
-          const info = await client.session.get({ path: { id: sessionID } });
-          if (isInternalSession(info.data?.title)) return;
-        } catch {
-          /* ignore */
-        }
-
-        const turns = sessionTurns.get(sessionID) ?? 0;
-        if (turns < NUDGE_INTERVAL) return;
-        // 全局频率控制：距上次审查 <30 分钟不触发
-        if (Date.now() - lastReviewAt < REVIEW_MIN_INTERVAL_MS) return;
-
-        if (idleTimer) clearTimeout(idleTimer);
-        idleTimer = setTimeout(async () => {
-          try {
-            const result = await runBackgroundReview(client, store, directory, currentProject, sessionID);
-            lastReviewAt = Date.now();
-            log(`background review: saved=${result.savedCount}${result.error ? ` err=${result.error}` : ""}`);
-            // Reset the turn counter so the next NUDGE_INTERVAL turns trigger
-            // another review (per-session learning loop, not once-per-session).
-            sessionTurns.set(sessionID, 0);
-            if (result.savedCount > 0) {
-              await client.tui
-                ?.showToast({
-                  body: {
-                    title: "Hermes Memory",
-                    message: `Saved ${result.savedCount} memory item(s) from this session`,
-                    variant: "info",
-                    duration: 4000,
-                  },
-                })
-                .catch(() => {});
-            }
-          } catch (err) {
-            log(`background review threw: ${String(err)}`);
-          } finally {
-            idleTimer = null;
-            if (lastIdleSession === sessionID) lastIdleSession = null;
-          }
-        }, IDLE_DEBOUNCE_MS);
-        lastIdleSession = sessionID;
-      } catch (err) {
-        log(`event handler error: ${String(err)}`);
-      }
-    },
-
-    // ─── Flush review before compaction (blocking, like Hermes) ───
-    "experimental.session.compacting": async (input, output) => {
-      try {
-        const sessionID = input.sessionID;
-        const result = await runFlushReview(client, store, directory, currentProject, sessionID);
+        const result = await runFlushReviewV2(ctx.session, ctx.generate, store, currentProject, event.sessionID);
         log(`flush review: saved=${result.savedCount}${result.error ? ` err=${result.error}` : ""}`);
-        if (result.savedCount > 0) {
-          output.context.push(
-            `[hermes-memory] Flush review saved ${result.savedCount} durable memory item(s) before compaction.`,
-          );
-        }
       } catch (err) {
-        log(`session.compacting error: ${String(err)}`);
+        log(`compaction hook error: ${String(err)}`);
       }
-    },
+    });
 
-    // ─── Error-memory prefetch (Mem0-style): bash failures → auto-inject
-    // related failure memories into the next assistant turn ───
-    "tool.execute.after": async (input, output) => {
+    // ─── Error-memory prefetch: bash failures → related lessons ───
+    await ctx.tool.hook("execute.after", async (event) => {
       try {
-        if (input.tool !== "bash") return;
-        const outText = String(output.output ?? "");
+        if (event.tool !== "bash" && event.tool !== "shell") return;
+        const outText = extractToolResultText(event as unknown as { status?: string; result?: unknown });
         if (!outText) return;
         if (!looksLikeBashError(outText)) return;
 
-        // 频率控制：同一会话 60s 内最多注入一次 prefetch（连续失败不重复注入）
         const now = Date.now();
-        const lastPrefetch = lastPrefetchAt.get(input.sessionID) ?? 0;
+        const lastPrefetch = lastPrefetchAt.get(event.sessionID) ?? 0;
         if (now - lastPrefetch < PREFETCH_MIN_INTERVAL_MS) return;
-        lastPrefetchAt.set(input.sessionID, now);
+        lastPrefetchAt.set(event.sessionID, now);
 
-        const cmd = String(input.args?.command ?? "").slice(0, 200);
+        const input = event.input as ToolInput | undefined;
+        const cmd = String(input?.["command"] ?? input?.["cmd"] ?? "").slice(0, 200);
         const errSnippet = extractErrorSnippet(outText);
         const query = `${cmd} ${errSnippet}`.slice(0, 300);
-        const hits = searchMemories(store, {
-          query,
-          target: "failure",
-          limit: 3,
-        });
+        const hits = searchMemories(store, { query, target: "failure", limit: 3 });
         if (hits.length === 0) return;
 
         const block = [
@@ -419,244 +547,73 @@ const plugin: Plugin = async ({ client, project, directory }) => {
           "Use these to avoid repeating past mistakes.",
           "</memory-prefetch>",
         ].join("\n");
-        await client.session
-          .prompt({
-            path: { id: input.sessionID },
-            body: {
-              parts: [
-                {
-                  id: `prt-memfetch-${Date.now()}`,
-                  type: "text",
-                  text: block,
-                  synthetic: true,
-                },
-              ],
-              noReply: true,
-            },
-          })
-          .catch((err) => log(`memory prefetch inject failed: ${String(err)}`));
+        await ctx.session
+          .synthetic({ sessionID: event.sessionID, text: block })
+          .catch((err: unknown) => log(`memory prefetch inject failed: ${String(err)}`));
         log(`memory prefetch: bash error → ${hits.length} failure hit(s) injected (cmd=${cmd.slice(0, 60)})`);
       } catch (err) {
         log(`tool.execute.after error: ${String(err)}`);
       }
-    },
+    });
 
-    // ─── Tools ───
-    tool: {
-      memory_search: tool({
-        description: MEMORY_SEARCH_TOOL_DESCRIPTION,
-        args: {
-          query: tool.schema.string().describe("Search terms (concrete words work best)."),
-          target: tool.schema.enum(TARGETS).optional().describe("Which memory layer to search. Omit to search all."),
-          category: tool.schema.enum(CATEGORIES).optional().describe("Only for target=failure: lesson category."),
-          project: tool.schema
-            .string()
-            .optional()
-            .describe("Project scope for project memories (defaults to current project)."),
-          limit: tool.schema.number().optional().describe("Max results (default 10)."),
-        },
-        async execute(args) {
-          // target 省略（全目标）或为 project 时都带上项目记忆，与自动注入行为一致
-          const project = args.target === "project" || !args.target ? args.project || currentProject : undefined;
-          const hits = searchMemories(store, {
-            query: args.query,
-            target: args.target,
-            category: args.category as MemoryCategory | undefined,
-            project,
-            limit: Math.max(1, Math.min(Math.floor(args.limit ?? 10), 50)),
-          });
-          if (hits.length === 0) {
-            return JSON.stringify({
-              success: true,
-              query: args.query,
-              count: 0,
-              results: [],
-            });
-          }
-          return JSON.stringify({
-            success: true,
-            query: args.query,
-            count: hits.length,
-            results: hits.map((h) => ({
-              target: h.target,
-              project: h.project ?? null,
-              score: Math.round(h.score * 100),
-              content: h.content,
-            })),
-          });
-        },
-      }),
-
-      memory_add: tool({
-        description: MEMORY_ADD_TOOL_DESCRIPTION,
-        args: {
-          content: tool.schema.string().describe("The durable fact to remember."),
-          target: tool.schema
-            .enum(TARGETS)
-            .describe("user=profile, memory=global notes, project=repo-specific, failure=categorized lesson."),
-          category: tool.schema.enum(CATEGORIES).optional().describe("Required for target=failure."),
-          failure_reason: tool.schema.string().optional().describe("Optional context for failure entries."),
-          project: tool.schema
-            .string()
-            .optional()
-            .describe(
-              "Project name when target=project (defaults to current project); also used to scope failure entries.",
-            ),
-        },
-        async execute(args) {
-          if (args.target === "project") {
-            const project = args.project || currentProject;
-            const r = await store.addToProject(project, args.content);
-            log(`memory_add project=${project} success=${r.success} err=${r.error ?? ""}`);
-            return JSON.stringify({
-              success: r.success,
-              message: r.message,
-              error: r.error,
-              usage: r.usage,
-              entry_count: r.entry_count,
-            });
-          }
-          const target = args.target as Target;
-          if (target === "failure" && !args.category) {
-            return JSON.stringify({
-              success: false,
-              error: "category is required for target=failure.",
-            });
-          }
-          // category 只在 target=failure 时生效；其他目标即使误传了 category 也按普通 add 处理
-          const r =
-            target === "failure" && args.category
-              ? await store.addFailure(args.content, {
-                  category: args.category as MemoryCategory,
-                  failureReason: args.failure_reason,
-                  project: args.project || currentProject,
-                })
-              : await store.add(target, args.content);
-          log(`memory_add target=${target} success=${r.success} err=${r.error ?? ""}`);
-          return JSON.stringify({
-            success: r.success,
-            message: r.message,
-            error: r.error,
-            usage: r.usage,
-            entry_count: r.entry_count,
-          });
-        },
-      }),
-
-      memory_replace: tool({
-        description:
-          "Replace an existing memory entry. old_text is matched exactly first (the full entry text or its [category] prefix), falling back to substring if no exact match. The old version is kept in evolution history (readable via memory_history).",
-        args: {
-          target: tool.schema.enum(TARGETS).describe("Which layer the entry lives in."),
-          old_text: tool.schema.string().describe("Entry text to match (exact match preferred, substring fallback)."),
-          content: tool.schema.string().describe("New entry text."),
-          project: tool.schema.string().optional().describe("Project name when target=project."),
-        },
-        async execute(args) {
-          if (args.target === "project") {
-            const r = await store.replaceProjectEntry(args.project || currentProject, args.old_text, args.content);
-            return JSON.stringify({
-              success: r.success,
-              message: r.message,
-              error: r.error,
-              matches: r.matches ?? null,
-            });
-          }
-          const r = await store.replace(args.target as Target, args.old_text, args.content);
-          return JSON.stringify({
-            success: r.success,
-            message: r.message,
-            error: r.error,
-            matches: r.matches ?? null,
-          });
-        },
-      }),
-
-      memory_remove: tool({
-        description:
-          "Remove a memory entry. old_text is matched exactly first (the full entry text or its [category] prefix), falling back to substring if no exact match.",
-        args: {
-          target: tool.schema.enum(TARGETS).describe("Which layer the entry lives in."),
-          old_text: tool.schema.string().describe("Entry text to match (exact match preferred, substring fallback)."),
-          project: tool.schema.string().optional().describe("Project name when target=project."),
-        },
-        async execute(args) {
-          if (args.target === "project") {
-            const r = await store.removeProjectEntry(args.project || currentProject, args.old_text);
-            return JSON.stringify({
-              success: r.success,
-              message: r.message,
-              error: r.error,
-              matches: r.matches ?? null,
-            });
-          }
-          const r = await store.remove(args.target as Target, args.old_text);
-          return JSON.stringify({
-            success: r.success,
-            message: r.message,
-            error: r.error,
-            matches: r.matches ?? null,
-          });
-        },
-      }),
-
-      memory_history: tool({
-        description:
-          "Read the evolution history of replaced memory entries (superseded versions kept by memory_replace). Use when you need to trace how a fact was configured before, or what an entry looked like before it was replaced. Read-only.",
-        args: {
-          query: tool.schema.string().optional().describe("Optional substring to filter history entries by."),
-          limit: tool.schema.number().optional().describe("Max entries to return (default 20)."),
-        },
-        async execute(args) {
-          let raw: string;
+    // ─── Background learning on idle + cleanup on delete ───
+    void (async () => {
+      try {
+        for await (const event of ctx.event.subscribe({ signal: controller.signal })) {
           try {
-            raw = await fsp.readFile(historyFile(), "utf-8");
-          } catch (err) {
-            if ((err as NodeJS.ErrnoException).code === "ENOENT") raw = "";
-            else return JSON.stringify({ success: false, error: String(err) });
-          }
-          try {
-            const entries = raw ? splitEntries(raw) : [];
-            const query = args.query ?? "";
-            const filtered = query ? entries.filter((e) => e.includes(query)) : entries;
-            const limit = Math.max(1, Math.min(Math.floor(args.limit ?? 20), 50));
-            const picked = filtered.slice(-limit);
-            return JSON.stringify({
-              success: true,
-              count: picked.length,
-              total: entries.length,
-              entries: picked.map((e) => {
-                const meta = store.getEntryMeta(e);
-                return {
-                  content: meta.text,
-                  created: meta.created,
-                  lastReferenced: meta.lastReferenced,
-                  superseded: meta.superseded,
-                  supersedes: meta.supersedes,
-                };
-              }),
-            });
-          } catch (err) {
-            return JSON.stringify({ success: false, error: String(err) });
-          }
-        },
-      }),
-    },
+            if (event.type === "session.deleted") {
+              const sessionID = (event as unknown as { data?: { sessionID?: string } }).data?.sessionID;
+              if (sessionID) {
+                sessionTurns.delete(sessionID);
+                injectedThisSession.delete(sessionID);
+                lastPrefetchAt.delete(sessionID);
+                clearSession(sessionID);
+                if (lastIdleSession === sessionID) lastIdleSession = null;
+              }
+              continue;
+            }
+            if (event.type !== "session.idle") continue;
+            const sessionID = (event as unknown as { data?: { sessionID?: string } }).data?.sessionID;
+            if (!sessionID || sessionID === lastIdleSession) continue;
 
-    // ─── Cleanup ───
-    dispose: async () => {
+            const turns = sessionTurns.get(sessionID) ?? 0;
+            if (turns < NUDGE_INTERVAL) continue;
+            if (Date.now() - lastReviewAt < REVIEW_MIN_INTERVAL_MS) continue;
+
+            if (idleTimer) clearTimeout(idleTimer);
+            idleTimer = setTimeout(async () => {
+              try {
+                const result = await runBackgroundReviewV2(ctx.session, ctx.generate, store, currentProject, sessionID);
+                lastReviewAt = Date.now();
+                log(`background review: saved=${result.savedCount}${result.error ? ` err=${result.error}` : ""}`);
+                sessionTurns.set(sessionID, 0);
+              } catch (err) {
+                log(`background review threw: ${String(err)}`);
+              } finally {
+                idleTimer = null;
+                if (lastIdleSession === sessionID) lastIdleSession = null;
+              }
+            }, IDLE_DEBOUNCE_MS);
+            lastIdleSession = sessionID;
+          } catch (err) {
+            log(`event handler error: ${String(err)}`);
+          }
+        }
+      } catch (err) {
+        // AbortError on unload is expected.
+        if ((err as Error)?.name !== "AbortError") log(`event subscription error: ${String(err)}`);
+      }
+    })();
+
+    // ─── Cleanup on unload ───
+    return () => {
+      controller.abort();
       if (idleTimer) clearTimeout(idleTimer);
-      // 清理会话级状态，防 Map 随会话数无限增长
       sessionTurns.clear();
       injectedThisSession.clear();
       lastPrefetchAt.clear();
       clearSessionState();
       log("disposed");
-    },
-  };
-};
-
-export default {
-  id: "hermes-memory",
-  server: plugin,
-};
+    };
+  },
+});

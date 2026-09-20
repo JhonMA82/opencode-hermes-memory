@@ -11,5 +11,5 @@
     "forceConsistentCasingInFileNames": true,
     "types": ["bun"]
   },
-  "include": ["hermes-memory.ts", "hermes-memory-lib/**/*.ts"]
+  "include": ["index.ts", "hermes-memory.ts", "hermes-memory-lib/**/*.ts"]
 }

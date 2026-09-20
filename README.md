@@ -28,21 +28,18 @@ Give your OpenCode agent a **real memory** — user preferences, project convent
 | **Error prefetch** | When a bash command fails, related past-failure lessons are auto-injected into the next turn (Mem0-style) |
 | **Bi-temporal evolution** | Replaced entries move to `history.md` — traceable, out of capacity, out of retrieval |
 
-## 🚀 Quick Start
+## 🚀 Quick Start (OpenCode V2)
+
+> Requires **OpenCode ≥ 2.0** and `@opencode/plugin` 2.x. This is v0.4.0+ (native V2).
+> Still on OpenCode 1.x? Use v0.3.x and the old `plugin` config.
 
 ### Install from GitHub (recommended)
 
 ```bash
-opencode plugin github:realchendahuang/opencode-hermes-memory
+opencode plugin add github:realchendahuang/opencode-hermes-memory
 ```
 
 That's it — OpenCode downloads the plugin from GitHub, installs it, and registers it in your config automatically. Restart OpenCode and the plugin starts learning from your sessions.
-
-> **Note**: add `-g` to install globally (all projects) instead of the current project:
->
-> ```bash
-> opencode plugin -g github:realchendahuang/opencode-hermes-memory
-> ```
 
 ### Manual install (local development)
 
@@ -52,11 +49,12 @@ mkdir -p ~/.config/opencode/plugins
 cp -R opencode-hermes-memory/hermes-memory.ts opencode-hermes-memory/hermes-memory-lib ~/.config/opencode/plugins/
 ```
 
-Then add to the `plugin` array in `~/.config/opencode/opencode.json`:
+Then add to the `plugins` array in `~/.config/opencode/opencode.json` (note: **`plugins`**, not `plugin`):
 
-```json
+```jsonc
 {
-  "plugin": [
+  "$schema": "https://opencode.ai/config.json",
+  "plugins": [
     "./plugins/hermes-memory.ts"
   ]
 }
@@ -66,7 +64,7 @@ And install the dependency:
 
 ```bash
 cd ~/.config/opencode
-npm install @opencode-ai/plugin
+npm install @opencode/plugin
 ```
 
 The plugin registers 5 tools (`memory_search`, `memory_add`, `memory_replace`, `memory_remove`, `memory_history`) and starts learning from your sessions automatically.
@@ -100,32 +98,46 @@ All files are plain Markdown — edit them directly whenever you like.
 ## 🏗️ Architecture
 
 ```
-hermes-memory.ts          # Plugin entry: event hooks, tool registration, injection logic
+index.ts                # Re-export (V2 resolves plugin dirs via index.ts)
+hermes-memory.ts          # Plugin entry (V2 native: Plugin.define + setup)
 hermes-memory-lib/
 ├── store.ts              # MemoryStore: Markdown I/O, dedup, capacity, consolidation
 ├── learn.ts              # Learning loop: background review, flush review, correction detection
 ├── search.ts             # Token-scored retrieval
 ├── prompts.ts            # Prompts & constants (capacity limits, injection thresholds)
-├── llm.ts                # Internal-session LLM channel (no direct completion API in OpenCode)
+├── llm.ts                # V2 LLM channel via ctx.generate.text (no internal sessions)
 ├── paths.ts              # Path helpers (setMemoryRoot for test isolation)
 └── tests/regression.ts   # Isolated regression tests
 ```
 
-### Event hooks
+### Hooks (V2)
 
-| Hook | Purpose |
+| V2 API | Purpose |
 |---|---|
-| `experimental.chat.system.transform` | Inject memory policy + STANDING + project memory into system prompt |
-| `chat.message` | Correction detection, turn counting, relevant-memory auto-injection |
-| `session.idle` | Background learning review (10s debounce, 30-min global rate limit) |
-| `experimental.session.compacting` | Flush review before context compaction |
-| `tool.execute.after` | Bash error detection → failure-memory prefetch |
+| `ctx.session.hook("context")` | Inject memory policy + STANDING + project memory into every model request |
+| `ctx.session.hook("prompt")` | Correction detection, turn counting, relevant-memory auto-injection |
+| `ctx.event.subscribe()` → `session.idle` | Background learning review (10s debounce, 30-min global rate limit) |
+| `ctx.session.hook("compaction")` | Flush review before context compaction |
+| `ctx.tool.hook("execute.after")` | Bash error detection → failure-memory prefetch |
+
+V1 mapping: `experimental.chat.system.transform` → `context`, `chat.message` → `prompt`,
+`experimental.session.compacting` → `compaction`, `event(session.idle)` → `event.subscribe`,
+`tool.execute.after` unchanged in name, internal-session LLM → `ctx.generate.text`.
 
 ## ⚙️ Configuration
 
-| Env var | Default | Description |
-|---|---|---|
-| `HERMES_NUDGE_INTERVAL` | `10` | Turns between background reviews |
+| Source | Key | Default | Description |
+|---|---|---|---|
+| Plugin options | `hermesNudgeInterval` | `10` | Turns between background reviews (V2 `plugins: [{package, options}]`) |
+| Env var | `HERMES_NUDGE_INTERVAL` | `10` | Same, fallback when no option is set |
+
+```jsonc
+{
+  "plugins": [
+    { "package": "./plugins/hermes-memory.ts", "options": { "hermesNudgeInterval": 10 } }
+  ]
+}
+```
 
 ## 🧪 Development
 
