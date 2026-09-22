@@ -80,7 +80,7 @@ Do not use memory_search for generic questions, one-off examples, or explanation
 // ─── memory_add tool description ───
 export const MEMORY_ADD_TOOL_DESCRIPTION = `Save durable information to persistent memory that survives across sessions. Memory is searchable in future turns, so keep it compact and focused on facts that will still matter later.
 
-WRITE CONCISELY: each entry must be ≤300 characters. Split long facts into multiple entries (one per aspect). Dense bullet lists beat prose.
+WRITE CONCISELY: aim for ≤300 characters per entry (hard max 3000). Split long facts into multiple entries (one per aspect). Dense bullet lists beat prose.
 
 WHEN TO SAVE (do this proactively, don't wait to be asked):
 - User corrects you or says 'remember this' / 'don't do that again'
@@ -129,7 +129,7 @@ Review these aspects:
 
 Do NOT create or modify skills. Only save genuinely durable facts — not task progress, session outcomes, or temporary state.
 
-WRITE CONCISELY: each entry must be ≤300 characters. If a fact needs more space, split it into multiple entries (one per aspect). Prefer dense bullet lists over prose. Long entries waste capacity and are harder to retrieve.
+WRITE CONCISELY: aim for ≤300 characters per entry (hard max 3000). If a fact needs more space, split it into multiple entries (one per aspect). Prefer dense bullet lists over prose. Long entries waste capacity and are harder to retrieve.
 
 ${DIRECT_MEMORY_OPERATIONS_SCHEMA}
 
@@ -137,7 +137,7 @@ If nothing is worth saving, return {"operations":[]}.`;
 
 export const DIRECT_FLUSH_SYSTEM_PROMPT = `The session is being compressed and about to lose context. Save anything worth remembering from the conversation — prioritize user preferences, corrections, and recurring patterns over task-specific details.
 
-WRITE CONCISELY: each entry must be ≤300 characters. Split long facts into multiple entries.
+WRITE CONCISELY: aim for ≤300 characters per entry (hard max 3000). Split long facts into multiple entries.
 
 ${DIRECT_MEMORY_OPERATIONS_SCHEMA}
 
@@ -150,7 +150,7 @@ export const DIRECT_CONSOLIDATION_SYSTEM_PROMPT = `The memory store you're given
 - Remove an entry only when it is clearly outdated AND superseded by another entry, or when it is an exact duplicate.
 - Preserve user preferences and corrections (highest priority) — never merge or remove these unless they are exact duplicates.
 - Do NOT remove entries merely because they are old. Age alone is not a reason to delete.
-- When merging, keep the merged entry ≤300 characters; split into multiple entries if needed.
+- When merging, aim for ≤300 characters per merged entry (hard max 3000); split into multiple entries if needed.
 
 Each entry shows when it was created and last referenced in HTML comments (<!-- created=..., last=... -->). Use this only to identify duplicates/superseded facts, not as a deletion trigger.
 

@@ -9,8 +9,9 @@
  *   - System injection via `ctx.session.hook("context")` (policy + STANDING +
  *     project memory)
  *   - Flush review via `ctx.session.hook("compaction")`
- *   - Error prefetch via `ctx.tool.hook("execute.after")` (bash failures)
- *   - Background learning via `ctx.event.subscribe()` (session.idle)
+ *   - Error prefetch via `ctx.tool.hook("execute.after")` (shell failures)
+ *   - Background learning via `ctx.event.subscribe()` (`session.status`
+ *     idle — `session.idle` kept as deprecated fallback)
  *   - LLM via `ctx.generate.text()` (no internal sessions)
  *
  * Layers:
@@ -24,6 +25,7 @@
  */
 import * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
+import * as os from "node:os";
 import * as path from "node:path";
 import { Plugin } from "@opencode/plugin";
 import {
@@ -35,7 +37,7 @@ import {
   runFlushReviewV2,
   setDebugLogger,
 } from "./hermes-memory-lib/learn.ts";
-import { historyFile } from "./hermes-memory-lib/paths.ts";
+import { historyFile, sanitizeProjectId } from "./hermes-memory-lib/paths.ts";
 import {
   DEFAULT_NUDGE_INTERVAL,
   MEMORY_ADD_TOOL_DESCRIPTION,
@@ -45,7 +47,7 @@ import {
 import { searchMemories } from "./hermes-memory-lib/search.ts";
 import { type MemoryCategory, MemoryStore, splitEntries, type Target } from "./hermes-memory-lib/store.ts";
 
-const LOG_FILE = path.join(process.env.HOME ?? ".", ".local", "share", "opencode", "log", "hermes-memory.log");
+const LOG_FILE = path.join(os.homedir(), ".local", "share", "opencode", "log", "hermes-memory.log");
 const LOG_MAX_BYTES = 1 * 1024 * 1024;
 const LOG_ROTATE_CHECK_INTERVAL_MS = 30_000;
 
@@ -88,11 +90,24 @@ function log(msg: string): void {
 }
 
 function projectIdOf(project: { id?: string } | undefined, directory: string): string {
-  if (project?.id) return project.id;
-  return path.basename(directory) || "default";
+  if (project?.id) return sanitizeProjectId(project.id);
+  return sanitizeProjectId(path.basename(directory) || "default");
 }
 
-// ─── Bash error detection (for failure-memory prefetch) ───
+/** Clamp a tool `limit` to [1, max] with a fallback for NaN/non-numbers. */
+function parseLimit(value: unknown, fallback: number, max: number): number {
+  const n = typeof value === "number" ? Math.floor(value) : Number.NaN;
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(1, Math.min(n, max));
+}
+
+const VALID_TARGETS = new Set(["memory", "user", "failure", "project"]);
+const VALID_CATEGORIES = new Set(["failure", "correction", "insight", "preference", "convention", "tool-quirk"]);
+
+// ─── Shell error detection (for failure-memory prefetch) ───
+// Note: patterns match shell output text ("bash" here means shell output,
+// not the tool name). The V2 tool name is `shell` (no `bash` tool exists;
+// see packages/core/src/tool/plugin/shell.ts, `export const name = "shell"`).
 const BASH_ERROR_PATTERNS: RegExp[] = [
   /command not found/i,
   /no such file or directory/i,
@@ -175,6 +190,32 @@ const CATEGORIES = ["failure", "correction", "insight", "preference", "conventio
 
 type ToolInput = Record<string, unknown>;
 
+/**
+ * Extract the sessionID when a subscribed event signals session idle.
+ *
+ * Primary: `session.status` with `status.type === "idle"` (current API —
+ * upstream `packages/schema/src/session-status-event.ts` marks the bare
+ * `session.idle` event as `// deprecated`).
+ * Fallback: `session.idle` with `data.sessionID` (still emitted in 2.0.11,
+ * kept so background learning keeps working on servers that only emit it).
+ * Returns null for busy/retry statuses and unrelated events.
+ */
+export function idleSessionOf(event: {
+  type?: string;
+  data?: { sessionID?: string; status?: { type?: string } | string };
+}): string | null {
+  if (!event || typeof event.type !== "string") return null;
+  const data = event.data;
+  if (!data || typeof data.sessionID !== "string" || !data.sessionID) return null;
+  if (event.type === "session.status") {
+    const status = (data as { status?: unknown }).status;
+    const statusType = typeof status === "string" ? status : (status as { type?: unknown } | undefined)?.type;
+    return statusType === "idle" ? data.sessionID : null;
+  }
+  if (event.type === "session.idle") return data.sessionID;
+  return null;
+}
+
 export default Plugin.define({
   id: "hermes-memory",
   async setup(ctx) {
@@ -185,23 +226,17 @@ export default Plugin.define({
     }
 
     const directory = ctx.location.directory;
-    const currentProject = projectIdOf(
-      ctx.location.project as { id?: string } | undefined,
-      directory,
-    );
+    const currentProject = projectIdOf(ctx.location.project as { id?: string } | undefined, directory);
     const NUDGE_INTERVAL = nudgeIntervalFromEnvAndOptions(ctx.options as Record<string, unknown>);
 
     const store = new MemoryStore({});
     await store.loadFromDisk().catch((err) => log(`store load failed: ${String(err)}`));
 
-    store.setConsolidator((target, _signal, projectId) =>
-      consolidateTargetV2(ctx.generate, store, target, projectId),
-    );
+    store.setConsolidator((target, _signal, projectId) => consolidateTargetV2(ctx.generate, store, target, projectId));
     setDebugLogger((msg) => log(msg));
 
     const sessionTurns = new Map<string, number>();
-    let idleTimer: ReturnType<typeof setTimeout> | null = null;
-    let lastIdleSession: string | null = null;
+    const idleTimers = new Map<string, ReturnType<typeof setTimeout>>();
     let lastReviewAt = 0;
     const REVIEW_MIN_INTERVAL_MS = 30 * 60 * 1000;
     const lastPrefetchAt = new Map<string, number>();
@@ -223,13 +258,20 @@ export default Plugin.define({
           type: "object",
           properties: {
             query: { type: "string", description: "Search terms (concrete words work best)." },
-            target: { type: "string", enum: [...TARGETS], description: "Which memory layer to search. Omit to search all." },
+            target: {
+              type: "string",
+              enum: [...TARGETS],
+              description: "Which memory layer to search. Omit to search all.",
+            },
             category: {
               type: "string",
               enum: [...CATEGORIES],
               description: "Only for target=failure: lesson category.",
             },
-            project: { type: "string", description: "Project scope for project memories (defaults to current project)." },
+            project: {
+              type: "string",
+              description: "Project scope for project memories (defaults to current project).",
+            },
             limit: { type: "number", description: "Max results (default 10)." },
           },
           required: ["query"],
@@ -243,13 +285,27 @@ export default Plugin.define({
             project?: string;
             limit?: number;
           };
+          if (typeof args.query !== "string" || !args.query.trim()) {
+            return { content: JSON.stringify({ success: false, error: "query must be a non-empty string." }) };
+          }
+          if (args.target !== undefined && !VALID_TARGETS.has(args.target)) {
+            return {
+              content: JSON.stringify({
+                success: false,
+                error: `Invalid target '${args.target}'. Use memory, user, failure, or project.`,
+              }),
+            };
+          }
+          if (args.category !== undefined && !VALID_CATEGORIES.has(args.category)) {
+            return { content: JSON.stringify({ success: false, error: `Invalid category '${args.category}'.` }) };
+          }
           const project = args.target === "project" || !args.target ? args.project || currentProject : undefined;
           const hits = searchMemories(store, {
             query: args.query,
             target: args.target,
             category: args.category,
             project,
-            limit: Math.max(1, Math.min(Math.floor(args.limit ?? 10), 50)),
+            limit: parseLimit(args.limit, 10, 50),
           });
           return {
             content: JSON.stringify({
@@ -298,6 +354,20 @@ export default Plugin.define({
             failure_reason?: string;
             project?: string;
           };
+          if (typeof args.content !== "string" || !args.content.trim()) {
+            return { content: JSON.stringify({ success: false, error: "content must be a non-empty string." }) };
+          }
+          if (!VALID_TARGETS.has(args.target)) {
+            return {
+              content: JSON.stringify({
+                success: false,
+                error: `Invalid target '${args.target}'. Use memory, user, failure, or project.`,
+              }),
+            };
+          }
+          if (args.category !== undefined && !VALID_CATEGORIES.has(args.category)) {
+            return { content: JSON.stringify({ success: false, error: `Invalid category '${args.category}'.` }) };
+          }
           if (args.target === "project") {
             const project = args.project || currentProject;
             const r = await store.addToProject(project, args.content);
@@ -347,7 +417,10 @@ export default Plugin.define({
           type: "object",
           properties: {
             target: { type: "string", enum: [...TARGETS], description: "Which layer the entry lives in." },
-            old_text: { type: "string", description: "Entry text to match (exact match preferred, substring fallback)." },
+            old_text: {
+              type: "string",
+              description: "Entry text to match (exact match preferred, substring fallback).",
+            },
             content: { type: "string", description: "New entry text." },
             project: { type: "string", description: "Project name when target=project." },
           },
@@ -356,15 +429,39 @@ export default Plugin.define({
         },
         async execute(input) {
           const args = input as { target: Target | "project"; old_text: string; content: string; project?: string };
+          if (!VALID_TARGETS.has(args.target)) {
+            return {
+              content: JSON.stringify({
+                success: false,
+                error: `Invalid target '${args.target}'. Use memory, user, failure, or project.`,
+              }),
+            };
+          }
+          if (typeof args.old_text !== "string" || !args.old_text.trim()) {
+            return { content: JSON.stringify({ success: false, error: "old_text must be a non-empty string." }) };
+          }
+          if (typeof args.content !== "string" || !args.content.trim()) {
+            return { content: JSON.stringify({ success: false, error: "content must be a non-empty string." }) };
+          }
           if (args.target === "project") {
             const r = await store.replaceProjectEntry(args.project || currentProject, args.old_text, args.content);
             return {
-              content: JSON.stringify({ success: r.success, message: r.message, error: r.error, matches: r.matches ?? null }),
+              content: JSON.stringify({
+                success: r.success,
+                message: r.message,
+                error: r.error,
+                matches: r.matches ?? null,
+              }),
             };
           }
           const r = await store.replace(args.target as Target, args.old_text, args.content);
           return {
-            content: JSON.stringify({ success: r.success, message: r.message, error: r.error, matches: r.matches ?? null }),
+            content: JSON.stringify({
+              success: r.success,
+              message: r.message,
+              error: r.error,
+              matches: r.matches ?? null,
+            }),
           };
         },
       });
@@ -377,7 +474,10 @@ export default Plugin.define({
           type: "object",
           properties: {
             target: { type: "string", enum: [...TARGETS], description: "Which layer the entry lives in." },
-            old_text: { type: "string", description: "Entry text to match (exact match preferred, substring fallback)." },
+            old_text: {
+              type: "string",
+              description: "Entry text to match (exact match preferred, substring fallback).",
+            },
             project: { type: "string", description: "Project name when target=project." },
           },
           required: ["target", "old_text"],
@@ -385,15 +485,36 @@ export default Plugin.define({
         },
         async execute(input) {
           const args = input as { target: Target | "project"; old_text: string; project?: string };
+          if (!VALID_TARGETS.has(args.target)) {
+            return {
+              content: JSON.stringify({
+                success: false,
+                error: `Invalid target '${args.target}'. Use memory, user, failure, or project.`,
+              }),
+            };
+          }
+          if (typeof args.old_text !== "string" || !args.old_text.trim()) {
+            return { content: JSON.stringify({ success: false, error: "old_text must be a non-empty string." }) };
+          }
           if (args.target === "project") {
             const r = await store.removeProjectEntry(args.project || currentProject, args.old_text);
             return {
-              content: JSON.stringify({ success: r.success, message: r.message, error: r.error, matches: r.matches ?? null }),
+              content: JSON.stringify({
+                success: r.success,
+                message: r.message,
+                error: r.error,
+                matches: r.matches ?? null,
+              }),
             };
           }
           const r = await store.remove(args.target as Target, args.old_text);
           return {
-            content: JSON.stringify({ success: r.success, message: r.message, error: r.error, matches: r.matches ?? null }),
+            content: JSON.stringify({
+              success: r.success,
+              message: r.message,
+              error: r.error,
+              matches: r.matches ?? null,
+            }),
           };
         },
       });
@@ -421,9 +542,9 @@ export default Plugin.define({
           }
           try {
             const entries = raw ? splitEntries(raw) : [];
-            const query = args.query ?? "";
+            const query = typeof args.query === "string" ? args.query : "";
             const filtered = query ? entries.filter((e) => e.includes(query)) : entries;
-            const limit = Math.max(1, Math.min(Math.floor(args.limit ?? 20), 50));
+            const limit = parseLimit(args.limit, 20, 50);
             const picked = filtered.slice(-limit);
             return {
               content: JSON.stringify({
@@ -483,9 +604,7 @@ export default Plugin.define({
           const fresh = hits.filter((h) => h.score >= INJECT_SCORE_THRESHOLD);
           if (fresh.length > 0) {
             const injected = injectedThisSession.get(event.sessionID) ?? new Set<string>();
-            const toInject = fresh
-              .filter((h) => !injected.has(h.content.slice(0, 60)))
-              .slice(0, MAX_INJECT_PER_TURN);
+            const toInject = fresh.filter((h) => !injected.has(h.content.slice(0, 60))).slice(0, MAX_INJECT_PER_TURN);
             if (toInject.length > 0) {
               const block = store.fenceBlock(
                 toInject
@@ -520,10 +639,12 @@ export default Plugin.define({
       }
     });
 
-    // ─── Error-memory prefetch: bash failures → related lessons ───
+    // ─── Error-memory prefetch: shell failures → related lessons ───
     await ctx.tool.hook("execute.after", async (event) => {
       try {
-        if (event.tool !== "bash" && event.tool !== "shell") return;
+        // V2 tool name is `shell` (upstream: core/src/tool/plugin/shell.ts).
+        // `bash` was the V1 tool name — no fallback: unknown tools are ignored.
+        if (event.tool !== "shell") return;
         const outText = extractToolResultText(event as unknown as { status?: string; result?: unknown });
         if (!outText) return;
         if (!looksLikeBashError(outText)) return;
@@ -534,7 +655,7 @@ export default Plugin.define({
         lastPrefetchAt.set(event.sessionID, now);
 
         const input = event.input as ToolInput | undefined;
-        const cmd = String(input?.["command"] ?? input?.["cmd"] ?? "").slice(0, 200);
+        const cmd = String(input?.command ?? input?.cmd ?? "").slice(0, 200);
         const errSnippet = extractErrorSnippet(outText);
         const query = `${cmd} ${errSnippet}`.slice(0, 300);
         const hits = searchMemories(store, { query, target: "failure", limit: 3 });
@@ -542,7 +663,7 @@ export default Plugin.define({
 
         const block = [
           "<memory-prefetch>",
-          "The last bash command failed. Related lessons from past failures:",
+          "The last shell command failed. Related lessons from past failures:",
           ...hits.map((h) => `• [${h.target}] ${h.content.slice(0, 400)}`),
           "Use these to avoid repeating past mistakes.",
           "</memory-prefetch>",
@@ -550,7 +671,7 @@ export default Plugin.define({
         await ctx.session
           .synthetic({ sessionID: event.sessionID, text: block })
           .catch((err: unknown) => log(`memory prefetch inject failed: ${String(err)}`));
-        log(`memory prefetch: bash error → ${hits.length} failure hit(s) injected (cmd=${cmd.slice(0, 60)})`);
+        log(`memory prefetch: shell error → ${hits.length} failure hit(s) injected (cmd=${cmd.slice(0, 60)})`);
       } catch (err) {
         log(`tool.execute.after error: ${String(err)}`);
       }
@@ -568,20 +689,27 @@ export default Plugin.define({
                 injectedThisSession.delete(sessionID);
                 lastPrefetchAt.delete(sessionID);
                 clearSession(sessionID);
-                if (lastIdleSession === sessionID) lastIdleSession = null;
+                const timer = idleTimers.get(sessionID);
+                if (timer) {
+                  clearTimeout(timer);
+                  idleTimers.delete(sessionID);
+                }
               }
               continue;
             }
-            if (event.type !== "session.idle") continue;
-            const sessionID = (event as unknown as { data?: { sessionID?: string } }).data?.sessionID;
-            if (!sessionID || sessionID === lastIdleSession) continue;
+            const sessionID = idleSessionOf(
+              event as { type?: string; data?: { sessionID?: string; status?: { type?: string } } },
+            );
+            if (!sessionID) continue;
+            // Per-session debounce: an idle from session B must not cancel a
+            // pending review for session A.
+            if (idleTimers.has(sessionID)) continue;
 
             const turns = sessionTurns.get(sessionID) ?? 0;
             if (turns < NUDGE_INTERVAL) continue;
             if (Date.now() - lastReviewAt < REVIEW_MIN_INTERVAL_MS) continue;
 
-            if (idleTimer) clearTimeout(idleTimer);
-            idleTimer = setTimeout(async () => {
+            const timer = setTimeout(async () => {
               try {
                 const result = await runBackgroundReviewV2(ctx.session, ctx.generate, store, currentProject, sessionID);
                 lastReviewAt = Date.now();
@@ -590,11 +718,10 @@ export default Plugin.define({
               } catch (err) {
                 log(`background review threw: ${String(err)}`);
               } finally {
-                idleTimer = null;
-                if (lastIdleSession === sessionID) lastIdleSession = null;
+                idleTimers.delete(sessionID);
               }
             }, IDLE_DEBOUNCE_MS);
-            lastIdleSession = sessionID;
+            idleTimers.set(sessionID, timer);
           } catch (err) {
             log(`event handler error: ${String(err)}`);
           }
@@ -608,7 +735,8 @@ export default Plugin.define({
     // ─── Cleanup on unload ───
     return () => {
       controller.abort();
-      if (idleTimer) clearTimeout(idleTimer);
+      for (const timer of idleTimers.values()) clearTimeout(timer);
+      idleTimers.clear();
       sessionTurns.clear();
       injectedThisSession.clear();
       lastPrefetchAt.clear();

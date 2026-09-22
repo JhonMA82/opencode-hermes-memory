@@ -21,8 +21,10 @@ import {
   PROJECTS_MEMORY_DIR,
   projectMemoryDir,
   projectMemoryFile,
+  sanitizeProjectId,
   standingFile,
   userFile,
+  validateProjectId,
 } from "./paths.ts";
 import {
   DEFAULT_MEMORY_CHAR_LIMIT,
@@ -30,6 +32,7 @@ import {
   DEFAULT_USER_CHAR_LIMIT,
   ENTRY_DELIMITER,
   STANDING_MAX_CHARS,
+  STANDING_MAX_ENTRIES,
 } from "./prompts.ts";
 
 export type Target = "memory" | "user" | "failure";
@@ -167,12 +170,14 @@ export class MemoryStore {
   }
   formatStandingForPrompt(): string {
     if (!this.standing.length) return "";
-    // 注入上限：STANDING 是硬规则，但注入必须受控（防上下文膨胀）。
-    // 超限时保留最新条目（用户最近写的规则反映当前意图），不动文件本身。
-    let items = this.standing;
+    // Injection cap: STANDING entries are hard rules but injection must stay
+    // bounded (avoid context bloat). Keep the newest entries (recently written
+    // rules reflect current intent); the file itself is untouched.
+    let items =
+      this.standing.length > STANDING_MAX_ENTRIES ? this.standing.slice(-STANDING_MAX_ENTRIES) : this.standing;
     let joined = items.join("\n");
     while (joined.length > STANDING_MAX_CHARS && items.length > 1) {
-      items = items.slice(1); // 丢弃最旧
+      items = items.slice(1); // drop oldest
       joined = items.join("\n");
     }
     const header = "STANDING INSTRUCTIONS (follow these):";
@@ -772,17 +777,18 @@ export class MemoryStore {
 
   // ─── Project memory ───
   async loadProject(projectId: string): Promise<string[]> {
+    const safeId = sanitizeProjectId(projectId);
     if (!projectId) return [];
-    if (this.projectEntries.has(projectId)) return this.projectEntries.get(projectId)!;
+    if (this.projectEntries.has(safeId)) return this.projectEntries.get(safeId)!;
     try {
-      const file = projectMemoryFile(projectId);
+      const file = projectMemoryFile(safeId);
       const raw = await fs.readFile(file, "utf-8");
       const entries = splitEntries(raw);
-      this.projectEntries.set(projectId, [...new Set(entries)]);
-      return this.projectEntries.get(projectId)!;
+      this.projectEntries.set(safeId, [...new Set(entries)]);
+      return this.projectEntries.get(safeId)!;
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code === "ENOENT") {
-        this.projectEntries.set(projectId, []);
+        this.projectEntries.set(safeId, []);
         return [];
       }
       throw e;
@@ -791,7 +797,7 @@ export class MemoryStore {
 
   private async projectFingerprint(projectId: string): Promise<string> {
     try {
-      const raw = await fs.readFile(projectMemoryFile(projectId));
+      const raw = await fs.readFile(projectMemoryFile(sanitizeProjectId(projectId)));
       return createHash("sha256").update(raw).digest("hex");
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code === "ENOENT") return "missing";
@@ -805,6 +811,9 @@ export class MemoryStore {
         success: false,
         error: "No active project for project-scoped memory.",
       };
+    const projectError = validateProjectId(projectId);
+    if (projectError) return { success: false, error: projectError };
+    const safeId = sanitizeProjectId(projectId);
     content = content.trim();
     if (!content) return { success: false, error: "Content cannot be empty." };
     if (content.length > MAX_SINGLE_ENTRY_CHARS) {
@@ -813,7 +822,7 @@ export class MemoryStore {
         error: `Entry too long (${content.length} chars, max ${MAX_SINGLE_ENTRY_CHARS}). Split into multiple entries or shorten.`,
       };
     }
-    const entries = await this.loadProject(projectId);
+    const entries = await this.loadProject(safeId);
     const limit = this.opts.projectCharLimit ?? DEFAULT_PROJECT_CHAR_LIMIT;
     const today = todayStr();
 
@@ -831,7 +840,7 @@ export class MemoryStore {
       // 与全局目标一致：超限先尝试 auto-consolidate（24h 冷却 + 保守合并），
       // 合并成功则重试写入；失败才报错。
       if (this.consolidator) {
-        const consolidation = await this.consolidator("project", undefined, projectId).catch(
+        const consolidation = await this.consolidator("project", undefined, safeId).catch(
           (err): ConsolidationResult => ({
             consolidated: false,
             error: `consolidator threw ${String(err).slice(0, 200)}`,
@@ -844,7 +853,7 @@ export class MemoryStore {
           };
         }
         if (consolidation.consolidated) {
-          const retried = await this.addToProject(projectId, content);
+          const retried = await this.addToProject(safeId, content);
           if (retried.success || !retried.error?.includes("Project memory at")) return retried;
           return {
             ...retried,
@@ -862,7 +871,7 @@ export class MemoryStore {
       };
     }
     entries.push(encoded);
-    await this.saveProjectToDisk(projectId, entries);
+    await this.saveProjectToDisk(safeId, entries);
     return {
       success: true,
       message: "Entry added.",
@@ -873,9 +882,12 @@ export class MemoryStore {
 
   async replaceProjectEntry(projectId: string, oldText: string, newContent: string): Promise<MemoryResult> {
     if (!projectId) return { success: false, error: "No active project." };
+    const projectError = validateProjectId(projectId);
+    if (projectError) return { success: false, error: projectError };
+    const safeId = sanitizeProjectId(projectId);
     oldText = normalizeLookup(oldText);
     newContent = newContent.trim();
-    const entries = await this.loadProject(projectId);
+    const entries = await this.loadProject(safeId);
     const limit = this.opts.projectCharLimit ?? DEFAULT_PROJECT_CHAR_LIMIT;
     const matches = matchEntries(entries, oldText);
     if (matches.length === 0) return { success: false, error: `No entry matched '${oldText}'.` };
@@ -911,7 +923,7 @@ export class MemoryStore {
         success: false,
         error: `Replacement would put project memory at ${newTotal}/${limit} chars.`,
       };
-    await this.saveProjectToDisk(projectId, test);
+    await this.saveProjectToDisk(safeId, test);
     await this.appendHistory("project", history).catch((err) => {
       console.error(`[hermes-memory] history append failed: ${String(err)}`);
     });
@@ -925,8 +937,11 @@ export class MemoryStore {
 
   async removeProjectEntry(projectId: string, oldText: string): Promise<MemoryResult> {
     if (!projectId) return { success: false, error: "No active project." };
+    const projectError = validateProjectId(projectId);
+    if (projectError) return { success: false, error: projectError };
+    const safeId = sanitizeProjectId(projectId);
     oldText = normalizeLookup(oldText);
-    const entries = await this.loadProject(projectId);
+    const entries = await this.loadProject(safeId);
     const limit = this.opts.projectCharLimit ?? DEFAULT_PROJECT_CHAR_LIMIT;
     const matches = matchEntries(entries, oldText);
     if (matches.length === 0) return { success: false, error: `No entry matched '${oldText}'.` };
@@ -937,7 +952,7 @@ export class MemoryStore {
       };
     const matched = new Set(matches);
     const remaining = entries.filter((e) => !matched.has(e));
-    await this.saveProjectToDisk(projectId, remaining);
+    await this.saveProjectToDisk(safeId, remaining);
     return {
       success: true,
       message: "Entry removed.",
@@ -947,12 +962,13 @@ export class MemoryStore {
   }
 
   private async saveProjectToDisk(projectId: string, entries: string[]): Promise<void> {
-    const file = projectMemoryFile(projectId);
-    const expected = await this.projectFingerprint(projectId);
+    const safeId = sanitizeProjectId(projectId);
+    const file = projectMemoryFile(safeId);
+    const expected = await this.projectFingerprint(safeId);
     const content = entries.length ? entries.join(ENTRY_DELIMITER) : "";
-    await fs.mkdir(projectMemoryDir(projectId), { recursive: true });
+    await fs.mkdir(projectMemoryDir(safeId), { recursive: true });
     await atomicWrite(file, content, expected);
-    this.projectEntries.set(projectId, entries);
+    this.projectEntries.set(safeId, entries);
   }
 
   private projectUsage(entries: string[], limit: number): string {
@@ -962,16 +978,17 @@ export class MemoryStore {
   }
 
   getProjectEntries(projectId: string): string[] {
-    return (this.projectEntries.get(projectId) ?? []).map((e) => this.stripMetadata(e));
+    return (this.projectEntries.get(sanitizeProjectId(projectId)) ?? []).map((e) => this.stripMetadata(e));
   }
 
   formatProjectBlock(projectId: string): string {
-    const entries = this.getProjectEntries(projectId);
+    const safeId = sanitizeProjectId(projectId);
+    const entries = this.getProjectEntries(safeId);
     if (!entries.length) return "";
     const limit = this.opts.projectCharLimit ?? DEFAULT_PROJECT_CHAR_LIMIT;
     const content = entries.join(ENTRY_DELIMITER);
     const pct = limit > 0 ? Math.min(100, Math.floor((content.length / limit) * 100)) : 0;
-    const header = `PROJECT MEMORY: ${projectId} [${pct}% — ${content.length}/${limit} chars]`;
+    const header = `PROJECT MEMORY: ${safeId} [${pct}% — ${content.length}/${limit} chars]`;
     const separator = "═".repeat(46);
     return this.fenceBlock(`${separator}\n${header}\n${separator}\n${content}`);
   }
@@ -1001,9 +1018,9 @@ export class MemoryStore {
   getRawEntriesFor(target: Target): string[] {
     return [...this.entriesFor(target)];
   }
-  /** 原始 project 条目（含元数据），供 consolidate 使用 */
+  /** Raw project entries (with metadata), for consolidate */
   getRawProjectEntries(projectId: string): string[] {
-    return [...(this.projectEntries.get(projectId) ?? [])];
+    return [...(this.projectEntries.get(sanitizeProjectId(projectId)) ?? [])];
   }
   /** 解码单条条目的元数据（created/last/project），供新鲜度加权与 consolidate 使用 */
   getEntryMeta(raw: string): DecodedEntry {
@@ -1019,8 +1036,9 @@ export class MemoryStore {
     try {
       const decoded = this.decodeEntry(rawEntry);
       const today = todayStr();
-      if (decoded.lastReferenced === today) return; // 同一天已 touch，跳过
-      // 必须透传 superseded/supersedes——漏掉会把 replace 留下的演化链元数据抹掉
+      if (decoded.lastReferenced === today) return; // already touched today, skip
+      // Must carry superseded/supersedes through — dropping them would erase
+      // the evolution chain left by replace on a retrieval hit.
       const updated = this.encodeEntry(
         decoded.text,
         decoded.created,
@@ -1032,12 +1050,13 @@ export class MemoryStore {
 
       if (target === "project") {
         if (!projectId) return;
-        const entries = this.projectEntries.get(projectId);
+        const safeId = sanitizeProjectId(projectId);
+        const entries = this.projectEntries.get(safeId);
         if (!entries) return;
         const idx = entries.indexOf(rawEntry);
         if (idx < 0) return;
         entries[idx] = updated;
-        this.saveProjectToDisk(projectId, entries).catch((err) => {
+        this.saveProjectToDisk(safeId, entries).catch((err) => {
           console.error(`[hermes-memory] touch project entry failed: ${String(err)}`);
         });
       } else {

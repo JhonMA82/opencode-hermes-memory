@@ -11,7 +11,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { detectCorrection, extractOperations } from "../learn.ts";
-import { setMemoryRoot } from "../paths.ts";
+import { sanitizeProjectId, setMemoryRoot, validateProjectId } from "../paths.ts";
 import { searchMemories } from "../search.ts";
 import { MemoryStore } from "../store.ts";
 
@@ -142,6 +142,49 @@ const noJson = extractOperations("抱歉，我无法处理这个请求。");
 assert("无 JSON 报错", noJson.operations.length === 0 && !!noJson.error);
 const arrayForm = extractOperations('[{"action":"remove","old_text":"y"}]');
 assert("数组形式解析", arrayForm.operations.length === 1, arrayForm.error ?? "");
+
+// 13. project id 安全：traversal 被拒绝，不写盘到 TMP 之外
+const traversal = await store.addToProject("../../evil", "should not write");
+assert(
+  "project traversal 拒绝",
+  !traversal.success && (traversal.error ?? "").includes("Invalid project"),
+  traversal.error ?? "",
+);
+const traversal2 = await store.replaceProjectEntry("../..", "x", "y");
+assert("replace traversal 拒绝", !traversal2.success, traversal2.error ?? "");
+const traversal3 = await store.removeProjectEntry("a/b", "x");
+assert("remove traversal 拒绝", !traversal3.success, traversal3.error ?? "");
+assert("validateProjectId 合法通过", validateProjectId("my-proj_1.2") === null);
+assert("validateProjectId 非法拒绝", validateProjectId("../../evil") !== null);
+assert(
+  "sanitizeProjectId 单段安全",
+  !sanitizeProjectId("../../evil").includes("/") && sanitizeProjectId("") === "default",
+);
+const outside = await fs
+  .stat(path.join(path.dirname(TMP), "evil"))
+  .then(() => true)
+  .catch(() => false);
+assert("traversal 未写盘到 TMP 之外", !outside);
+// 合法 project 仍可用
+const projOk = await store.addToProject("proj-safe-1", "安全项目条目");
+assert("合法 project 仍可写", projOk.success, projOk.error ?? "");
+await store.removeProjectEntry("proj-safe-1", "安全项目条目");
+
+// 14. STANDING 注入上限：20 条 + 2000 字符，保留最新
+const standingEntries = Array.from(
+  { length: 25 },
+  (_, i) => `规则${i + 1} <!-- created=2026-01-01, last=2026-01-01 -->`,
+);
+await fs.writeFile(path.join(TMP, "STANDING.md"), standingEntries.join("\n§\n"), "utf-8");
+await store.loadFromDisk();
+const standingBlock = store.formatStandingForPrompt();
+const standingLines = standingBlock.split("\n").filter((l) => l.startsWith("•"));
+assert("STANDING 最多 20 条", standingLines.length <= 20, String(standingLines.length));
+assert(
+  "STANDING 保留最新",
+  standingBlock.includes("规则25") && !standingBlock.includes("规则1 <!--"),
+  standingBlock.slice(0, 200),
+);
 
 // ─── 清理临时目录 ───
 // touchEntry 是 fire-and-forget 异步落盘，等一拍再 rm，避免 teardown 竞态噪音

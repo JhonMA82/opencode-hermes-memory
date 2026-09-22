@@ -11,12 +11,13 @@
  *  - prompt hook: correction detection saves failure memory
  *  - context hook: injects policy + standing + project
  *  - compaction hook: runs without throwing (empty transcript)
- *  - execute.after: bash error with no failure memories → no crash
+ *  - execute.after: shell error injects failure lessons; legacy bash ignored
+ *  - idleSessionOf: session.status idle primary, session.idle deprecated fallback
  */
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import plugin from "../../hermes-memory.ts";
+import plugin, { idleSessionOf } from "../../hermes-memory.ts";
 import { setMemoryRoot } from "../paths.ts";
 
 const TMP = await fs.mkdtemp(path.join(os.tmpdir(), "hm-v2-"));
@@ -35,7 +36,12 @@ function assert(name: string, cond: boolean, detail = "") {
 }
 
 // ─── Mock ctx ───
-type ToolDef = { name: string; description: string; input: unknown; execute: (input: unknown) => Promise<{ content: string }> };
+type ToolDef = {
+  name: string;
+  description: string;
+  input: unknown;
+  execute: (input: unknown) => Promise<{ content: string }>;
+};
 const tools = new Map<string, ToolDef>();
 const sessionHooks = new Map<string, Array<(event: Record<string, unknown>) => void | Promise<void>>>();
 const toolHooks = new Map<string, Array<(event: Record<string, unknown>) => void | Promise<void>>>();
@@ -60,10 +66,7 @@ const ctx = {
     },
   },
   tool: {
-    transform: async (cb: (editor: {
-      add: (t: ToolDef) => void;
-      namespace: (_ns: unknown) => void;
-    }) => void) => {
+    transform: async (cb: (editor: { add: (t: ToolDef) => void; namespace: (_ns: unknown) => void }) => void) => {
       cb({ add: (t) => tools.set(t.name, t), namespace: () => {} });
       return { dispose: async () => {} };
     },
@@ -85,7 +88,7 @@ const ctx = {
 
 assert("plugin id", (plugin as { id?: string }).id === "hermes-memory", String((plugin as { id?: string }).id));
 
-const cleanup = await (plugin as { setup: (ctx: unknown) => Promise<(() => void) | void> }).setup(ctx);
+const cleanup = await (plugin as { setup: (ctx: unknown) => Promise<(() => void) | undefined> }).setup(ctx);
 assert("setup returns cleanup", typeof cleanup === "function");
 
 assert("5 tools registered", tools.size === 5, [...tools.keys()].join(","));
@@ -114,20 +117,28 @@ out = JSON.parse((await search.execute({ query: "other config", target: "failure
 assert("correction saved to failure", out.count >= 1, JSON.stringify(out));
 
 // ─── context hook: system injection ───
-const contextEvent: Record<string, unknown> = { sessionID: "ses-1", system: [] as Array<{ type: string; text: string }> };
+const contextEvent: { sessionID: string; system: Array<{ type: string; text: string }> } & Record<string, unknown> = {
+  sessionID: "ses-1",
+  system: [] as Array<{ type: string; text: string }>,
+};
 const contextHook = sessionHooks.get("context")![0];
 await contextHook(contextEvent);
-const system = contextEvent["system"] as Array<{ type: string; text: string }>;
-assert("context injects policy", system.length >= 1 && system[0].text.includes("Persistent memory"), JSON.stringify(system.length));
+const system = contextEvent.system;
+assert(
+  "context injects policy",
+  system.length >= 1 && system[0].text.includes("Persistent memory"),
+  JSON.stringify(system.length),
+);
 
 // ─── compaction hook: no crash on empty ───
 const compactionHook = sessionHooks.get("compaction")![0];
 await compactionHook({ sessionID: "ses-1", system: [], messages: [], options: {}, tools: {} });
 assert("compaction hook ok", true);
 
-// ─── execute.after: non-bash ignored, bash error without memories ok ───
+// ─── execute.after: shell error injects lessons; legacy bash ignored ───
 const afterHook = toolHooks.get("execute.after")![0];
 await afterHook({ tool: "read", sessionID: "ses-1", input: {}, status: "completed", result: { content: "ok" } });
+const syntheticsBefore = synthetics.length;
 await afterHook({
   tool: "bash",
   sessionID: "ses-1",
@@ -135,7 +146,45 @@ await afterHook({
   status: "completed",
   result: { content: "ls: cannot access /nonexistent: No such file or directory" },
 });
-assert("execute.after ok", true);
+assert("legacy bash tool ignored", synthetics.length === syntheticsBefore, String(synthetics.length));
+// Seed a failure lesson so shell prefetch has something to inject.
+await add.execute({ content: "shell failure lesson for prefetch", target: "failure", category: "failure" });
+await afterHook({
+  tool: "shell",
+  sessionID: "ses-1",
+  input: { command: "ls /nonexistent" },
+  status: "completed",
+  result: { content: "ls: cannot access /nonexistent: No such file or directory" },
+});
+assert("shell error prefetches lessons", synthetics.length > syntheticsBefore, String(synthetics.length));
+
+// ─── idleSessionOf: session.status primary, session.idle deprecated fallback ───
+assert(
+  "session.status idle recognized",
+  idleSessionOf({ type: "session.status", data: { sessionID: "ses-1", status: { type: "idle" } } }) === "ses-1",
+);
+assert(
+  "session.status busy ignored",
+  idleSessionOf({ type: "session.status", data: { sessionID: "ses-1", status: { type: "busy" } } }) === null,
+);
+assert(
+  "session.idle fallback recognized",
+  idleSessionOf({ type: "session.idle", data: { sessionID: "ses-1" } }) === "ses-1",
+);
+
+// ─── tool input validation ───
+out = JSON.parse((await search.execute({ query: "", limit: 5 })).content);
+assert("memory_search rejects empty query", out.success === false, JSON.stringify(out));
+out = JSON.parse((await search.execute({ query: "smoke", target: "nope", limit: 5 })).content);
+assert("memory_search rejects invalid target", out.success === false, JSON.stringify(out));
+out = JSON.parse((await search.execute({ query: "smoke fact", limit: Number.NaN })).content);
+assert("memory_search NaN limit falls back", out.success === true && out.count >= 1, JSON.stringify(out));
+out = JSON.parse((await add.execute({ content: "", target: "memory" })).content);
+assert("memory_add rejects empty content", out.success === false, JSON.stringify(out));
+out = JSON.parse((await add.execute({ content: "x", target: "nope" })).content);
+assert("memory_add rejects invalid target", out.success === false, JSON.stringify(out));
+out = JSON.parse((await add.execute({ content: "traversal", target: "project", project: "../../evil" })).content);
+assert("memory_add rejects traversal project", out.success === false, JSON.stringify(out));
 
 if (typeof cleanup === "function") await cleanup();
 await new Promise((r) => setTimeout(r, 50));

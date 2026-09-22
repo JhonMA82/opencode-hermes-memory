@@ -15,13 +15,13 @@ jobs:
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
         with:
-          bun-version: latest
+          bun-version: 1.4.0
 
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
-      - name: Run regression tests
-        run: bun run hermes-memory-lib/tests/regression.ts
+      - name: Run tests (regression + V2 smoke)
+        run: bun run test
 
   typecheck:
     runs-on: ubuntu-latest
@@ -31,7 +31,7 @@ jobs:
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
         with:
-          bun-version: latest
+          bun-version: 1.4.0
 
       - name: Install dependencies
         run: bun install --frozen-lockfile
@@ -47,10 +47,10 @@ jobs:
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
         with:
-          bun-version: latest
+          bun-version: 1.4.0
 
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
       - name: Lint
-        run: bunx biome check hermes-memory.ts hermes-memory-lib/
+        run: bun run lint

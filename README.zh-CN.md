@@ -25,15 +25,18 @@
 | **L2 — 检索** | `memory_search` 工具，基于 token 打分的轻量检索（无需向量库） |
 | **学习闭环** | 会话空闲时后台 LLM 审查自动沉淀记忆；规则检测纠正即时入库；压缩前 flush 审查；容量触顶自动 consolidate |
 | **自动注入** | 每条用户消息到达时自动检索相关记忆注入上下文（score ≥ 0.4，每轮最多 2 条，会话级去重） |
-| **错误预取** | bash 命令失败时，自动注入相关历史失败教训（Mem0 风格） |
+| **错误预取** | shell 命令失败时，自动注入相关历史失败教训（Mem0 风格） |
 | **双时态演化** | 被替换的旧条目进入 `history.md`——可追溯、不占容量、不参与检索 |
 
-## 🚀 快速开始
+## 🚀 快速开始（OpenCode V2）
+
+> 需要 **OpenCode ≥ 2.0** 与 `@opencode/plugin` 2.x。这是 v0.4.0+（原生 V2）。
+> 还在用 OpenCode 1.x？请用 v0.3.x 与旧版 `plugin` 配置。
 
 ### 从 GitHub 安装（推荐）
 
 ```bash
-opencode plugin github:realchendahuang/opencode-hermes-memory
+opencode plugin add github:realchendahuang/opencode-hermes-memory
 ```
 
 一条命令搞定——OpenCode 自动从 GitHub 下载插件、安装并写入配置。重启 OpenCode 后插件即开始从你的会话中学习。
@@ -41,7 +44,7 @@ opencode plugin github:realchendahuang/opencode-hermes-memory
 > **提示**：加 `-g` 参数可全局安装（所有项目生效），不加则只对当前项目生效：
 >
 > ```bash
-> opencode plugin -g github:realchendahuang/opencode-hermes-memory
+> opencode plugin add -g github:realchendahuang/opencode-hermes-memory
 > ```
 
 ### 手动安装（本地开发用）
@@ -52,11 +55,12 @@ mkdir -p ~/.config/opencode/plugins
 cp -R opencode-hermes-memory/hermes-memory.ts opencode-hermes-memory/hermes-memory-lib ~/.config/opencode/plugins/
 ```
 
-然后在 `~/.config/opencode/opencode.json` 的 `plugin` 数组中加入：
+然后在 `~/.config/opencode/opencode.json` 的 `plugins` 数组中加入（注意是 **`plugins`**，不是 `plugin`）：
 
-```json
+```jsonc
 {
-  "plugin": [
+  "$schema": "https://opencode.ai/config.json",
+  "plugins": [
     "./plugins/hermes-memory.ts"
   ]
 }
@@ -66,7 +70,7 @@ cp -R opencode-hermes-memory/hermes-memory.ts opencode-hermes-memory/hermes-memo
 
 ```bash
 cd ~/.config/opencode
-npm install @opencode-ai/plugin
+npm install @opencode/plugin
 ```
 
 插件会注册 5 个工具（`memory_search`、`memory_add`、`memory_replace`、`memory_remove`、`memory_history`），并自动开始从你的会话中学习。
@@ -100,41 +104,63 @@ memory/
 ## 🏗️ 架构
 
 ```
-hermes-memory.ts          # 插件入口：事件钩子、工具注册、注入逻辑
+index.ts                # Re-export（V2 通过 index.ts 解析插件目录）
+hermes-memory.ts          # 插件入口（V2 原生：Plugin.define + setup）
 hermes-memory-lib/
 ├── store.ts              # MemoryStore：Markdown 读写、查重、容量、consolidate
 ├── learn.ts              # 学习闭环：后台审查、flush 审查、纠正检测
 ├── search.ts             # token 打分检索
 ├── prompts.ts            # 提示词与常量（容量上限、注入阈值等）
-├── llm.ts                # 内部会话 LLM 通道（OpenCode 无直接 completion API 的替代方案）
+├── llm.ts                # V2 LLM 通道（ctx.generate.text，无内部会话）
 ├── paths.ts              # 路径函数（setMemoryRoot 测试隔离）
-└── tests/regression.ts   # 隔离回归测试
+└── tests/                # regression.ts（隔离回归）+ v2-smoke.ts（mock ctx 烟雾测试）
 ```
 
-### 事件钩子
+### 事件钩子（V2）
 
-| 钩子 | 作用 |
+| V2 API | 作用 |
 |---|---|
-| `experimental.chat.system.transform` | 注入记忆策略 + STANDING + 项目记忆到 system prompt |
-| `chat.message` | 纠正检测、轮次计数、相关记忆自动注入 |
-| `session.idle` | 后台学习审查（10s 防抖，全局 30 分钟频率限制） |
-| `experimental.session.compacting` | 压缩前 flush 审查 |
-| `tool.execute.after` | bash 错误检测 → 失败教训预取 |
+| `ctx.session.hook("context")` | 每次模型请求注入记忆策略 + STANDING + 项目记忆 |
+| `ctx.session.hook("prompt")` | 纠正检测、轮次计数、相关记忆自动注入 |
+| `ctx.event.subscribe()` → `session.status`（idle） | 后台学习审查（10s 防抖，30 分钟全局频率限制） |
+| `ctx.session.hook("compaction")` | 压缩前 flush 审查 |
+| `ctx.tool.hook("execute.after")` | shell 错误检测 → 失败教训预取 |
+
+V1 映射：`experimental.chat.system.transform` → `context`、`chat.message` → `prompt`、
+`experimental.session.compacting` → `compaction`、`event(session.idle)` → `event.subscribe`
+（`session.status` idle 为主，`session.idle` 在上游已 deprecated，仅作 fallback）、
+`tool.execute.after` 名称不变（V2 工具名为 `shell`，不是 `bash`），内部会话 LLM → `ctx.generate.text`。
 
 ## ⚙️ 配置
 
-| 环境变量 | 默认 | 说明 |
-|---|---|---|
-| `HERMES_NUDGE_INTERVAL` | `10` | 后台审查间隔（轮次） |
+| 来源 | 键 | 默认 | 说明 |
+|---|---|---|---|
+| Plugin options | `hermesNudgeInterval` | `10` | 后台审查间隔轮次（V2 `plugins: [{package, options}]`） |
+| 环境变量 | `HERMES_NUDGE_INTERVAL` | `10` | 同上，无 option 时的 fallback |
+
+```jsonc
+{
+  "plugins": [
+    { "package": "./plugins/hermes-memory.ts", "options": { "hermesNudgeInterval": 10 } }
+  ]
+}
+```
 
 ## 🧪 开发
 
 ```bash
 # 运行隔离回归测试（绝不触碰真实记忆文件）
+bun run test
+
+# 单独运行
 bun run hermes-memory-lib/tests/regression.ts
+bun run hermes-memory-lib/tests/v2-smoke.ts
 
 # 类型检查
 bunx tsc --noEmit
+
+# Lint
+bun run lint
 ```
 
 测试通过 `setMemoryRoot(临时目录)` 完全隔离，不触碰真实记忆。

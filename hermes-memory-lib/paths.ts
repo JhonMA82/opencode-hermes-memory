@@ -40,7 +40,7 @@ export function standingFile(): string {
   return path.join(MEMORY_ROOT, "STANDING.md");
 }
 export function projectMemoryDir(projectId: string): string {
-  return path.join(MEMORY_ROOT, PROJECTS_MEMORY_DIR, projectId);
+  return path.join(MEMORY_ROOT, PROJECTS_MEMORY_DIR, sanitizeProjectId(projectId));
 }
 export function projectMemoryFile(projectId: string): string {
   return path.join(projectMemoryDir(projectId), "MEMORY.md");
@@ -49,7 +49,39 @@ export function projectMemoryFile(projectId: string): string {
 export function consolidateStateFile(): string {
   return path.join(MEMORY_ROOT, ".consolidate-state.json");
 }
-/** 双时态演化历史文件：被取代的旧条目（不占容量、不参与检索） */
+/** Double-temporal evolution history file: superseded old entries (no capacity, no retrieval) */
 export function historyFile(): string {
   return path.join(MEMORY_ROOT, "history.md");
+}
+
+/**
+ * Sanitize a project id for safe use as a single path segment.
+ * Project ids can come from LLM-controlled tool input (`project` param),
+ * so raw values must never flow into `path.join` unchecked (`../../evil`
+ * would escape MEMORY_ROOT). Allowed: letters, digits, `.`, `-`, `_`,
+ * max 64 chars. Anything else is replaced with `_`; empty results fall
+ * back to `default`. The sanitized value is always a single safe segment.
+ */
+export function sanitizeProjectId(projectId: string): string {
+  const trimmed = (projectId ?? "").trim();
+  if (!trimmed) return "default";
+  const sanitized = trimmed.replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 64);
+  if (!sanitized || sanitized === "." || sanitized === "..") return "default";
+  return sanitized;
+}
+
+/**
+ * Strict validation for project ids supplied via tools.
+ * Returns an error message when the id is missing or would be altered by
+ * sanitization (possible traversal or separator injection); null when ok.
+ */
+export function validateProjectId(projectId: unknown): string | null {
+  if (typeof projectId !== "string" || !projectId.trim()) return "Project name cannot be empty.";
+  const trimmed = projectId.trim();
+  if (trimmed.length > 64) return "Project name too long (max 64 characters).";
+  if (trimmed === "." || trimmed === "..") return "Invalid project name.";
+  if (/[^A-Za-z0-9._-]/.test(trimmed)) {
+    return `Invalid project name '${trimmed}'. Use only letters, digits, '.', '-', '_'.`;
+  }
+  return null;
 }

@@ -4,6 +4,27 @@
 
 ## [Unreleased]
 
+### Fixed
+- Lifecycle (upstream contrast, not just installed types): `session.idle` is `// deprecated` in `packages/schema/src/session-status-event.ts` (v2.0.11 source) — background learning now triggers on `session.status` idle as primary, keeping `session.idle` only as deprecated fallback (`idleSessionOf`, exported for tests)
+- Lifecycle: V2 tool name is `shell` (`packages/core/src/tool/plugin/shell.ts`, `export const name = "shell"` — no `bash` tool exists) — `execute.after` no longer matches legacy `bash`, only `shell`; prefetch copy updated shell-first
+- Security: sanitize/validate project ids (`sanitizeProjectId`/`validateProjectId`) — LLM-controlled `project` params can no longer traverse outside `projects-memory/` (`../../evil` rejected, no disk write)
+- Idle debounce is now per-session (`idleTimers` map) — an idle from session B no longer cancels a pending review for session A; deleted sessions clear their own timer
+- Tool input validation: `memory_search`/`memory_add`/`memory_replace`/`memory_remove` reject empty `query`/`content`/`old_text` and unknown `target`/`category`; `limit` NaN falls back instead of returning empty
+- `applyOperations` no longer silently falls back project ops without a project name to global `memory` — now recorded as an explicit error
+- `package.json`: removed duplicate `@opencode/plugin` (dev vs dependencies) so `bun install --frozen-lockfile` passes; `main` aligned to `index.ts` (matches `exports`)
+- CI: runs `bun run test` (regression + V2 smoke), `bun run lint` (includes `index.ts`), pinned Bun `1.4.0`
+- Docs: `README.zh-CN.md` updated to V2 parity (hooks, `plugins` array, `@opencode/plugin`, options, dev commands); `README.md`/`CONTRIBUTING.md` synced (test counts, `llm.ts` V2 channel, `index.ts`)
+- Prompts: clarified ≤300 chars recommended, hard max 3000 (was contradictory `must be ≤300` vs store `3000`)
+- `STANDING_MAX_ENTRIES` (20) now enforced in `formatStandingForPrompt` (was defined but unused)
+- `LOG_FILE` uses `os.homedir()` (was `process.env.HOME ?? "."`)
+
+### Changed (BREAKING: requires OpenCode >= 2.0)
+- Removed V1 dead code after the 0.4.0 break: `completeWithInternalSession`/`isInternalSession*` (`llm.ts`), V1 wrappers `runBackgroundReview`/`runFlushReview`/`consolidateTarget` (`learn.ts`)
+
+### Added
+- Regression: project traversal rejection, `validate`/`sanitize` round-trip, `STANDING` 20-entry cap (35 assertions)
+- V2 smoke: invalid target/category, empty query/content, NaN limit fallback, traversal rejection, shell-only prefetch + `session.status`/`session.idle` idle mapping (28 assertions)
+
 ## [0.4.0] - 2026-09-20
 
 ### Changed (BREAKING: requires OpenCode >= 2.0)

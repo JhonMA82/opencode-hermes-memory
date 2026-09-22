@@ -25,7 +25,7 @@ Give your OpenCode agent a **real memory** — user preferences, project convent
 | **L2 — Retrieval** | `memory_search` tool with lightweight token-scored ranking (no vector DB needed) |
 | **Learning loop** | Background LLM review on idle summarizes sessions into durable memories; rule-based correction detection saves corrections instantly; flush review before compaction; auto-consolidation at capacity |
 | **Auto-injection** | Relevant memories are retrieved and injected into context on every user message (score ≥ 0.4, max 2/turn, deduplicated per session) |
-| **Error prefetch** | When a bash command fails, related past-failure lessons are auto-injected into the next turn (Mem0-style) |
+| **Error prefetch** | When a shell command fails, related past-failure lessons are auto-injected into the next turn (Mem0-style) |
 | **Bi-temporal evolution** | Replaced entries move to `history.md` — traceable, out of capacity, out of retrieval |
 
 ## 🚀 Quick Start (OpenCode V2)
@@ -116,13 +116,14 @@ hermes-memory-lib/
 |---|---|
 | `ctx.session.hook("context")` | Inject memory policy + STANDING + project memory into every model request |
 | `ctx.session.hook("prompt")` | Correction detection, turn counting, relevant-memory auto-injection |
-| `ctx.event.subscribe()` → `session.idle` | Background learning review (10s debounce, 30-min global rate limit) |
+| `ctx.event.subscribe()` → `session.status` (idle) | Background learning review (10s debounce, 30-min global rate limit) |
 | `ctx.session.hook("compaction")` | Flush review before context compaction |
 | `ctx.tool.hook("execute.after")` | Bash error detection → failure-memory prefetch |
 
 V1 mapping: `experimental.chat.system.transform` → `context`, `chat.message` → `prompt`,
-`experimental.session.compacting` → `compaction`, `event(session.idle)` → `event.subscribe`,
-`tool.execute.after` unchanged in name, internal-session LLM → `ctx.generate.text`.
+`experimental.session.compacting` → `compaction`, `event(session.idle)` → `event.subscribe`
+(`session.status` idle; `session.idle` is deprecated upstream but kept as fallback),
+`tool.execute.after` unchanged in name (V2 tool is `shell`, not `bash`), internal-session LLM → `ctx.generate.text`.
 
 ## ⚙️ Configuration
 
@@ -142,14 +143,21 @@ V1 mapping: `experimental.chat.system.transform` → `context`, `chat.message` �
 ## 🧪 Development
 
 ```bash
-# Run the isolated regression suite (never touches real memory files)
+# Run the isolated suites (never touches real memory files)
+bun run test
+
+# Individual suites
 bun run hermes-memory-lib/tests/regression.ts
+bun run hermes-memory-lib/tests/v2-smoke.ts
 
 # Type-check
 bunx tsc --noEmit
+
+# Lint
+bun run lint
 ```
 
-The test suite uses `setMemoryRoot(临时目录)` to fully isolate from your real memory.
+The test suite uses `setMemoryRoot(tmpdir)` to fully isolate from your real memory.
 
 ## 🤝 Contributing
 

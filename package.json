@@ -3,7 +3,7 @@
   "version": "0.4.0",
   "description": "Layered persistent memory plugin for OpenCode V2 — ported from Hermes agent",
   "type": "module",
-  "main": "hermes-memory.ts",
+  "main": "index.ts",
   "exports": {
     ".": "./index.ts"
   },
@@ -54,7 +54,6 @@
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.8",
-    "@opencode/plugin": "2.0.11",
     "@types/bun": "1.4.0",
     "typescript": "5.8.2"
   }

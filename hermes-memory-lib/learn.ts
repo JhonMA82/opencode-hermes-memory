@@ -3,15 +3,11 @@
  *
  * V2 native path uses dependency injection:
  *   LearnDeps { getMessages(sessionID), complete(system, user) }
- * so the same logic works with V1 internal sessions and V2 generate.text.
- *
- * Legacy V1 wrappers (runBackgroundReview / runFlushReview / consolidateTarget
- * with the old (client, store, directory, ...) signature) are kept for the
- * `server()` export.
+ * backed by `ctx.session.context` + `ctx.generate.text`.
  */
 
 import * as fs from "node:fs/promises";
-import { type InternalCompletion, completeWithGenerate, completeWithInternalSession } from "./llm.ts";
+import { completeWithGenerate, type InternalCompletion } from "./llm.ts";
 import { consolidateStateFile } from "./paths.ts";
 import {
   CORRECTION_DIRECTIVE_WORDS,
@@ -128,8 +124,7 @@ export async function applyOperations(
 
   for (const op of projectOps) {
     if (!op.project) {
-      const r = await store.add("memory", op.content ?? "");
-      if (!r.success) errors.push(`project op without project name (fell back to memory): ${r.error}`);
+      errors.push("project op without project name: skipped (no fallback — specify project explicitly).");
       continue;
     }
     if (op.action === "add") {
@@ -147,7 +142,7 @@ export async function applyOperations(
   return { errors };
 }
 
-// ─── LearnDeps: injected transcript + completion (V1 and V2 share logic) ───
+// ─── LearnDeps: injected transcript + completion ───
 export type LearnDeps = {
   getMessages: (sessionID: string) => Promise<unknown[]>;
   complete: (system: string, user: string) => Promise<InternalCompletion>;
@@ -217,55 +212,12 @@ async function runFlushReviewCore(
   }
 }
 
-// ─── V1 wrappers (legacy server() export) ───
-type V1ClientLike = {
-  session: {
-    messages: (input: unknown) => Promise<{ data?: unknown[] }>;
-    create: (input: unknown) => Promise<{ data?: { id?: string } }>;
-    prompt: (input: unknown) => Promise<{ data?: { parts?: Array<{ type?: string; text?: unknown }> } }>;
-    delete: (input: unknown) => Promise<unknown>;
-  };
-};
-
-function v1Deps(client: V1ClientLike, directory: string): LearnDeps {
-  return {
-    getMessages: async (sessionID: string) => {
-      const msgs = await client.session.messages({ path: { id: sessionID } } as unknown);
-      return msgs.data ?? [];
-    },
-    complete: (system, user) => completeWithInternalSession(client as never, directory, system, user),
-  };
-}
-
-export async function runBackgroundReview(
-  client: V1ClientLike,
-  store: MemoryStore,
-  directory: string,
-  projectId: string,
-  sessionID: string,
-): Promise<{ savedCount: number; error?: string }> {
-  return runBackgroundReviewCore(v1Deps(client, directory), store, projectId, sessionID);
-}
-
-export async function runFlushReview(
-  client: V1ClientLike,
-  store: MemoryStore,
-  directory: string,
-  projectId: string,
-  sessionID: string,
-): Promise<{ savedCount: number; error?: string }> {
-  return runFlushReviewCore(v1Deps(client, directory), store, projectId, sessionID);
-}
-
 // ─── V2 entry points (ctx.session.context + ctx.generate.text) ───
 type V2SessionLike = {
   context: (input: { sessionID: string }) => Promise<unknown[] | { data?: unknown[] }>;
 };
 type V2GenerateLike = {
-  text: (input: {
-    prompt: string;
-    model?: { providerID: string; id: string };
-  }) => Promise<{ text: string }>;
+  text: (input: { prompt: string; model?: { providerID: string; id: string } }) => Promise<{ text: string }>;
 };
 
 function v2Deps(session: V2SessionLike, generate: V2GenerateLike): LearnDeps {
@@ -415,18 +367,6 @@ async function consolidateTargetCore(
   return { consolidated: true };
 }
 
-/** V1 wrapper (legacy). */
-export async function consolidateTarget(
-  client: V1ClientLike,
-  store: MemoryStore,
-  target: Target | "project",
-  directory: string,
-  projectId?: string,
-): Promise<{ consolidated: boolean; deferred?: boolean; error?: string }> {
-  const deps = v1Deps(client, directory);
-  return consolidateTargetCore(deps.complete, store, target, projectId);
-}
-
 /**
  * V2 consolidate with explicit store + generate (used by the plugin entry's
  * setConsolidator closure).
@@ -512,7 +452,7 @@ export function clearSessionState(): void {
   reviewedUpTo.clear();
 }
 
-// ─── Transcript builder (handles V1 + V2 message shapes) ───
+// ─── Transcript builder (V2 SessionMessageInfo; V1 shape kept for legacy transcripts) ───
 /** Existing-memory list cap for the review model (avoid duplicate saves). */
 const EXISTING_MEMORY_MAX_CHARS = 4000;
 
@@ -602,5 +542,5 @@ function buildTranscript(messages: unknown[]): string {
   return joined;
 }
 
-export { buildTranscript };
 export type { V1MessageLike as MessageLike };
+export { buildTranscript };
